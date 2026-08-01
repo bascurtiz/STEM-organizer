@@ -1,4 +1,4 @@
-"""Stem player window — port of stem_player.StemPlayerWindow.
+﻿"""Stem player window â€” port of stem_player.StemPlayerWindow.
 
 Non-modal QWidget. Header (Load / title / time / transport / master volume /
 meter), timeline + per-track rows (S / M / volume / waveform), and a
@@ -10,7 +10,7 @@ Waveform drawing uses QPainter (see waveform_widget.py).
 
 Keyboard shortcuts:
   Space       play / pause
-  ← / →       seek ±15s
+  â† / â†’       seek Â±15s
   [  /  ]     prev / next song
   P / F       mark folder [pass] / [fail]
   1..4        solo stem 1..4   (Shift or !@#$ = mute)
@@ -54,6 +54,7 @@ from qfluentwidgets import (
 from .. import theme
 from ..renamer.audio_player_bar import _make_transport_button, _set_transport_icon
 from .audio_engine import AudioEngine, PLAYER_SR
+from .audio_io import ensure_player_audio_deps, load_player_audio
 from .meter_widget import MeterWidget
 from .track_state import TrackState, _to_stereo
 from .waveform_widget import WaveformWidget
@@ -69,7 +70,6 @@ STEM_ORDER_4 = ("bass", "drums", "other", "vocals")
 DEMUCS_LAYOUT_STEMS = ("other", "drums", "bass")
 FILE_STEM_NAMES = STEM_ORDER_4 + ("instrumental",)
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aiff", ".aif", ".opus")
-SF_READ_EXTS = {".wav", ".flac", ".aif", ".aiff", ".ogg", ".mp3", ".m4a", ".opus"}
 PLAYER_WIN_W = 1180
 PLAYER_WIN_H = 960
 PLAYER_MIN_W = 900
@@ -109,111 +109,6 @@ STEM_LABELS = {
 
 
 # ---------------------------------------------------------------------------
-# Audio decoding (port of _ensure_player_audio_deps + load_player_audio)
-# ---------------------------------------------------------------------------
-
-_np = None
-_sf = None
-_ffmpeg = None
-_audio_deps_ready = False
-
-
-def _ensure_player_audio_deps() -> None:
-    global _np, _sf, _ffmpeg, _audio_deps_ready
-    if _audio_deps_ready:
-        return
-    from ffmpeg_bootstrap import ffmpeg_path, subprocess_kwargs  # noqa: F401
-
-    import numpy as np
-    import soundfile as sf
-
-    _np = np
-    _sf = sf
-    _ffmpeg = ffmpeg_path()
-    _audio_deps_ready = True
-
-
-def _normalize_player_audio(audio, file_sr: int, sr: int, ch: int):
-    _ensure_player_audio_deps()
-    if audio.shape[0] == 1:
-        audio = _np.repeat(audio, ch, axis=0)
-    elif audio.shape[0] > ch:
-        audio = audio[:ch]
-    if file_sr == sr:
-        # Contiguous RAM copy — never keep a soundfile mmap view on the
-        # mix hot path (page faults under a cold OS cache after listing
-        # thousands of sibling folders cause audible underruns).
-        return _np.ascontiguousarray(audio, dtype=_np.float32)
-    try:
-        from audio_resample import resample_audio
-
-        audio = resample_audio(audio, file_sr, sr, axis=1)
-    except ImportError:
-        raise RuntimeError(
-            f"Sample rate mismatch ({file_sr} Hz vs {sr} Hz) and scipy is not installed."
-        )
-    return _np.ascontiguousarray(audio, dtype=_np.float32)
-
-
-def _read_soundfile_player(path: str, sr: int, ch: int):
-    _ensure_player_audio_deps()
-    # Read into RAM (no mmap). Playback must not depend on page faults from
-    # a library root that may contain thousands of sibling folders.
-    try:
-        data, file_sr = _sf.read(path, dtype="float32", always_2d=True)
-        return _normalize_player_audio(data.T, file_sr, sr, ch)
-    except Exception:
-        return None
-
-
-def _read_via_ffmpeg_player(path: str, sr: int, ch: int):
-    _ensure_player_audio_deps()
-    if not _ffmpeg:
-        return None
-    from ffmpeg_bootstrap import subprocess_kwargs
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        subprocess.run(
-            [_ffmpeg, "-y", "-loglevel", "error", "-i", path,
-             "-ar", str(sr), "-ac", str(ch), tmp_path],
-            check=True, capture_output=True,
-            **subprocess_kwargs(),
-        )
-        return _read_soundfile_player(tmp_path, sr, ch)
-    except Exception:
-        return None
-    finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
-
-
-def load_player_audio(path: str, sr: int = PLAYER_SR, ch: int = 2):
-    _ensure_player_audio_deps()
-    p = Path(path)
-    ext = p.suffix.lower()
-    if ext in SF_READ_EXTS:
-        audio = _read_soundfile_player(str(p), sr, ch)
-        if audio is not None:
-            return audio
-    audio = _read_via_ffmpeg_player(str(p), sr, ch)
-    if audio is not None:
-        return audio
-    try:
-        from demucs.audio import AudioFile
-        return AudioFile(path).read(streams=0, samplerate=sr, channels=ch).numpy().astype(_np.float32)
-    except Exception as exc:
-        hint = (
-            "Re-run install-deps.bat if packages are missing. "
-            "For FLAC without ffmpeg, ensure soundfile/libsndfile supports FLAC."
-        )
-        raise RuntimeError(f"Could not decode audio ({p.name}): {exc}\n{hint}") from exc
-
-
-# ---------------------------------------------------------------------------
 # Waveform peaks (port of compute_waveform_peaks + _compute_peaks_full_fast)
 # ---------------------------------------------------------------------------
 
@@ -221,22 +116,24 @@ _PEAKS_FAST_MAX_SAMPLES = 600_000
 
 
 def compute_waveform_peaks(mono, num_bins: int):
-    _ensure_player_audio_deps()
+    ensure_player_audio_deps()
+    import numpy as np
+
     if num_bins < 1:
-        return _np.zeros(1, dtype=_np.float32)
-    mono = _np.asarray(mono, dtype=_np.float32).ravel()
+        return np.zeros(1, dtype=np.float32)
+    mono = np.asarray(mono, dtype=np.float32).ravel()
     if mono.size == 0:
-        return _np.zeros(num_bins, dtype=_np.float32)
+        return np.zeros(num_bins, dtype=np.float32)
     n = mono.size
     step = max(1, n // num_bins)
     count = min(num_bins, (n + step - 1) // step)
     usable = count * step
     if usable <= 0:
-        return _np.zeros(num_bins, dtype=_np.float32)
-    peaks = _np.max(_np.abs(mono[:usable].reshape(count, step)), axis=1)
+        return np.zeros(num_bins, dtype=np.float32)
+    peaks = np.max(np.abs(mono[:usable].reshape(count, step)), axis=1)
     if count < num_bins:
-        peaks = _np.pad(peaks, (0, num_bins - count))
-    return peaks.astype(_np.float32)
+        peaks = np.pad(peaks, (0, num_bins - count))
+    return peaks.astype(np.float32)
 
 
 def resample_peak_bins(peaks, num_bins: int):
@@ -246,28 +143,32 @@ def resample_peak_bins(peaks, num_bins: int):
     interp when the visible window is denser than the load-time cache.
     Linspace / plain interp on downsample drops peaks and draws chunky polygons.
     """
-    _ensure_player_audio_deps()
+    ensure_player_audio_deps()
+    import numpy as np
+
     bins = max(1, int(num_bins))
-    arr = _np.asarray(peaks, dtype=_np.float32).ravel()
+    arr = np.asarray(peaks, dtype=np.float32).ravel()
     n = int(arr.size)
     if n == 0:
-        return _np.zeros(bins, dtype=_np.float32)
+        return np.zeros(bins, dtype=np.float32)
     if n == bins:
         return arr
     if n < bins:
-        src_x = _np.arange(n, dtype=_np.float32)
-        dst_x = _np.linspace(0, n - 1, bins, dtype=_np.float32)
-        return _np.interp(dst_x, src_x, arr).astype(_np.float32)
+        src_x = np.arange(n, dtype=np.float32)
+        dst_x = np.linspace(0, n - 1, bins, dtype=np.float32)
+        return np.interp(dst_x, src_x, arr).astype(np.float32)
     # Max-pool each display column over its source span.
-    bucket = _np.minimum((_np.arange(n, dtype=_np.int64) * bins) // n, bins - 1)
-    out = _np.zeros(bins, dtype=_np.float32)
-    _np.maximum.at(out, bucket, arr)
+    bucket = np.minimum((np.arange(n, dtype=np.int64) * bins) // n, bins - 1)
+    out = np.zeros(bins, dtype=np.float32)
+    np.maximum.at(out, bucket, arr)
     return out
 
 
 def _compute_peaks_full_fast(mono):
-    _ensure_player_audio_deps()
-    mono = _np.asarray(mono, dtype=_np.float32).ravel()
+    ensure_player_audio_deps()
+    import numpy as np
+
+    mono = np.asarray(mono, dtype=np.float32).ravel()
     if mono.size > _PEAKS_FAST_MAX_SAMPLES:
         step = max(1, mono.size // _PEAKS_FAST_MAX_SAMPLES)
         mono = mono[::step]
@@ -398,9 +299,9 @@ def _strip_review_tag(name: str) -> str:
 def list_player_song_folders(library_root: Path) -> List[Path]:
     """Immediate song-folder children of *library_root* (sorted, case-insensitive).
 
-    Uses ``os.scandir`` so ``is_dir`` is free on Windows (DirEntry cache) —
+    Uses ``os.scandir`` so ``is_dir`` is free on Windows (DirEntry cache) â€”
     ``Path.iterdir`` + ``Path.is_dir`` costs an extra stat per entry and was
-    ~6× slower at ~4000 folders in local benchmarks.
+    ~6Ã— slower at ~4000 folders in local benchmarks.
     """
     root = os.fspath(library_root)
     if not os.path.isdir(root):
@@ -546,7 +447,7 @@ class TimelineWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 def _sm_button_style(*, active: bool, danger: bool = False) -> str:
-    """Plain S/M chrome — Fluent ToggleButton paints a glitched indicator at 28px."""
+    """Plain S/M chrome â€” Fluent ToggleButton paints a glitched indicator at 28px."""
     if active:
         bg = theme.COLORS["danger"] if danger else theme.COLORS["accent"]
         fg = theme.COLORS["log_fg"]
@@ -650,7 +551,7 @@ class _FolderNameBar(BodyLabel):
             bg = theme.CONTROL_BG
         else:
             bg = "transparent"
-        # Type+objectName selector only — bare color/bg rules restyle QToolTip.
+        # Type+objectName selector only â€” bare color/bg rules restyle QToolTip.
         self.setStyleSheet(
             f"QLabel#StemFolderChip {{"
             f" color: {theme.DARK['text']}; background-color: {bg};"
@@ -703,7 +604,7 @@ class TrackRow(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
-        # Left controls — vertically centered in the row
+        # Left controls â€” vertically centered in the row
         ctrl = QFrame()
         ctrl.setFixedWidth(CONTROLS_W - 8)
         ctrl_layout = QVBoxLayout(ctrl)
@@ -787,7 +688,7 @@ class StemPlayerWindow(QWidget):
                 pass
         self.resize(pw, ph)
         self.setMinimumSize(PLAYER_MIN_W, PLAYER_MIN_H)
-        # Opening size used for minimize → taskbar restore (match main GUI).
+        # Opening size used for minimize â†’ taskbar restore (match main GUI).
         self._default_w = pw
         self._default_h = ph
 
@@ -806,7 +707,7 @@ class StemPlayerWindow(QWidget):
         # Center once after first show (frame / thick-frame geometry known).
         self._center_pending = True
         # Closed windows destroy their HWND; reopening must construct a new
-        # StemPlayerWindow (show() on a closed instance → CreateWindowEx fail).
+        # StemPlayerWindow (show() on a closed instance â†’ CreateWindowEx fail).
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         # State
@@ -824,7 +725,7 @@ class StemPlayerWindow(QWidget):
         self._busy_generation = 0
         # Library scans use a separate generation so folder loads (which bump
         # _busy_generation) cannot mark a just-finished scan as stale and leave
-        # _song_folders empty — that permanently breaks [ ] / prev/next.
+        # _song_folders empty â€” that permanently breaks [ ] / prev/next.
         self._library_gen = 0
         self._library_scan_pending = False
         # Queued prev/next steps while a load is in flight or the library list
@@ -890,7 +791,7 @@ class StemPlayerWindow(QWidget):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        # FluentIcon (theme fg) — not 📁 emoji (Windows yellow color glyph).
+        # FluentIcon (theme fg) â€” not ðŸ“ emoji (Windows yellow color glyph).
         self.load_btn = PushButton(FluentIcon.FOLDER, "Load")
         self.load_btn.setToolTip(
             theme.format_tooltip(
@@ -910,21 +811,21 @@ class StemPlayerWindow(QWidget):
         header.addWidget(self.time_lbl)
 
         # Transport
-        self.prev_song_btn = PushButton("◀")
+        self.prev_song_btn = PushButton("â—€")
         self.prev_song_btn.setFixedWidth(36)
         self.prev_song_btn.setToolTip("Previous song ([)")
         self.prev_song_btn.clicked.connect(self._prev_song_folder)
-        # _make_transport_button already connects on_click — do not connect again
-        # (double-connect toggles play+pause in one click → appears broken).
+        # _make_transport_button already connects on_click â€” do not connect again
+        # (double-connect toggles play+pause in one click â†’ appears broken).
         self.play_btn = _make_transport_button(self, self._toggle_play)
         self.play_btn.setToolTip("Play / Pause (Space)")
         _set_transport_icon(self.play_btn, playing=False)
         self.play_btn._is_playing = False
-        self.stop_btn = PushButton("■")
+        self.stop_btn = PushButton("â– ")
         self.stop_btn.setFixedWidth(36)
         self.stop_btn.setToolTip("Stop")
         self.stop_btn.clicked.connect(self._stop)
-        self.next_song_btn = PushButton("▶")
+        self.next_song_btn = PushButton("â–¶")
         self.next_song_btn.setFixedWidth(36)
         self.next_song_btn.setToolTip("Next song (])")
         self.next_song_btn.clicked.connect(self._next_song_folder)
@@ -965,7 +866,7 @@ class StemPlayerWindow(QWidget):
         self.tracks_layout = QVBoxLayout(self.tracks_host)
         self.tracks_layout.setContentsMargins(0, 0, 0, 0)
         self.tracks_layout.setSpacing(6)
-        # No trailing stretch — stem rows share height equally (CTk uniform='track').
+        # No trailing stretch â€” stem rows share height equally (CTk uniform='track').
         self.tracks_scroll.setWidget(self.tracks_host)
         content_layout.addWidget(self.tracks_scroll, stretch=1)
 
@@ -1011,8 +912,8 @@ class StemPlayerWindow(QWidget):
         if stem_count > 0:
             n = min(stem_count, 4)
             groups.append((tuple(str(i + 1) for i in range(n)), "Solo stem", "gap"))
-            groups.append((tuple(f"⇧{i + 1}" for i in range(n)), "Mute stem", "gap"))
-            groups.append((("←", "→"), "Seek ±15s", "gap"))
+            groups.append((tuple(f"â‡§{i + 1}" for i in range(n)), "Mute stem", "gap"))
+            groups.append((("â†", "â†’"), "Seek Â±15s", "gap"))
             groups.append((("[", "]"), "Prev / Next", "gap"))
             groups.append((("P", "F"), "Pass / Fail", "gap"))
         else:
@@ -1020,7 +921,7 @@ class StemPlayerWindow(QWidget):
             groups.append((("[", "]"), "Prev / Next", "gap"))
             groups.append((("P", "F"), "Pass / Fail", "gap"))
 
-        # Equal stretches at ends and between groups → even spread across width.
+        # Equal stretches at ends and between groups â†’ even spread across width.
         self._shortcuts_layout.addStretch(1)
         for i, (keys, label, join) in enumerate(groups):
             if i > 0:
@@ -1035,16 +936,16 @@ class StemPlayerWindow(QWidget):
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.WindowShortcut)
             shortcut.activated.connect(handler)
-            # Keep a Python ref — parented QObjects can still be GC'd in PySide.
+            # Keep a Python ref â€” parented QObjects can still be GC'd in PySide.
             self._shortcuts.append(shortcut)
 
         _sc(Qt.Key_Space, self._toggle_play)
         _sc(Qt.Key_Left, lambda: self._seek_relative(-SEEK_JUMP_SEC))
         _sc(Qt.Key_Right, lambda: self._seek_relative(SEEK_JUMP_SEC))
-        # Prefer key enums — string "[" / "]" is unreliable across layouts.
+        # Prefer key enums â€” string "[" / "]" is unreliable across layouts.
         _sc(Qt.Key_BracketLeft, self._prev_song_folder)
         _sc(Qt.Key_BracketRight, self._next_song_folder)
-        # Explicit letter sequences — Qt.Key_P alone can miss lowercase keypresses
+        # Explicit letter sequences â€” Qt.Key_P alone can miss lowercase keypresses
         # when focus sits on Fluent controls.
         _sc("P", lambda: self._mark_folder_review("pass"))
         _sc("F", lambda: self._mark_folder_review("fail"))
@@ -1081,7 +982,7 @@ class StemPlayerWindow(QWidget):
         # Invalidate any in-flight folder load from a previous library.
         self._busy_generation += 1
         self._folder_job_active = False
-        self.title_lbl.setText(f"Scanning {library_root.name}…")
+        self.title_lbl.setText(f"Scanning {library_root.name}â€¦")
         self._sync_folder_name_bar()
         if self._executor is None:
             # Keep pool small: library scan + at most one neighbor prefetch.
@@ -1124,7 +1025,7 @@ class StemPlayerWindow(QWidget):
             self._pending_folder_delta = 0
         target = self._song_folders[idx]
         # Manual Load may already be opening / displaying this song while the
-        # new parent library was scanning — sync index only, do not reload.
+        # new parent library was scanning â€” sync index only, do not reload.
         if self._same_path(self._folder, target):
             self._folder_index = idx
             self._pending_open_index = None
@@ -1252,7 +1153,7 @@ class StemPlayerWindow(QWidget):
         QTimer.singleShot(200, self._schedule_prefetch_adjacent)
 
     def _load_tracks_from_stems(self, folder: Path) -> List[TrackState]:
-        _ensure_player_audio_deps()
+        ensure_player_audio_deps()
         pairs = detect_stem_folder(folder)
         if not pairs:
             return []
@@ -1266,7 +1167,7 @@ class StemPlayerWindow(QWidget):
                 continue
             track = TrackState(name, path, audio, STEM_COLORS.get(name, theme.COLORS["accent"]))
             track.peaks_full = peaks_full
-            # Keep track.name as the role key (vocals/bass/…) for order + colors.
+            # Keep track.name as the role key (vocals/bass/â€¦) for order + colors.
             # Display label is applied in _build_track_rows via _stem_row_label.
             tracks.append(track)
         return tracks
@@ -1348,7 +1249,7 @@ class StemPlayerWindow(QWidget):
 
     def _clear_track_rows(self) -> None:
         # Remove every row. Leaving a leftover widget made next-track loads
-        # show a duplicate previous stem. No trailing stretch — rows themselves
+        # show a duplicate previous stem. No trailing stretch â€” rows themselves
         # expand to fill the scroll viewport equally.
         while self.tracks_layout.count():
             item = self.tracks_layout.takeAt(0)
@@ -1390,7 +1291,7 @@ class StemPlayerWindow(QWidget):
             row.wave.clicked.connect(self._on_wave_click)
             # Waveform width changes on row layout, not only window resize.
             row.wave.width_changed.connect(self._redraw_timer.start)
-            # Equal stretch → 50/50 for 2 stems, ~25% each for 4 (CTk uniform rows).
+            # Equal stretch â†’ 50/50 for 2 stems, ~25% each for 4 (CTk uniform rows).
             self.tracks_layout.addWidget(row, stretch=1)
             track.row_widget = row
             track.wave_widget = row.wave
@@ -1574,17 +1475,19 @@ class StemPlayerWindow(QWidget):
         return max(0.0, min(self._duration(), t))
 
     def _peaks_for_view(self, track: TrackState, bins: int):
-        _ensure_player_audio_deps()
+        ensure_player_audio_deps()
+        import numpy as np
+
         full = track.peaks_full
         dur = self._duration()
         if full is None or dur <= 0:
-            return _np.zeros(max(1, bins), dtype=_np.float32)
+            return np.zeros(max(1, bins), dtype=np.float32)
         n = len(full)
         i0 = int(max(0, min(n - 1, (self._view_start / dur) * n)))
         i1 = int(max(i0 + 1, min(n, (self._view_end() / dur) * n)))
         region = full[i0:i1]
         if region.size == 0:
-            return _np.zeros(max(1, bins), dtype=_np.float32)
+            return np.zeros(max(1, bins), dtype=np.float32)
         return resample_peak_bins(region, bins)
 
     def _follow_playhead(self, pos: float) -> bool:
@@ -1818,7 +1721,7 @@ class StemPlayerWindow(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_review_done(self, new_path: Path, idx: int, verdict: str) -> None:
-        # Update the in-memory library slot in place — do NOT rescan thousands
+        # Update the in-memory library slot in place â€” do NOT rescan thousands
         # of sibling folders on the UI thread (blocks the audio callback GIL).
         old_path = self._folder
         new_path = Path(new_path)
@@ -1870,7 +1773,7 @@ class StemPlayerWindow(QWidget):
     # ----- close -----
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Drop resize mouse-grab before hide — otherwise the grip's cursor can
+        # Drop resize mouse-grab before hide â€” otherwise the grip's cursor can
         # stick on the host window underneath.
         from ..widgets.titlebar import disarm_win32_thick_frame
 
@@ -1959,7 +1862,7 @@ class StemPlayerWindow(QWidget):
         )
 
     def changeEvent(self, event) -> None:  # noqa: N802
-        # Same as MainWindow: minimize → taskbar restore → opening/default size.
+        # Same as MainWindow: minimize â†’ taskbar restore â†’ opening/default size.
         from ..widgets.titlebar import (
             note_activation_chrome_refresh,
             note_minimize_restore_to_default,
@@ -1991,7 +1894,7 @@ class StemPlayerWindow(QWidget):
         return super().nativeEvent(eventType, message)
 
     def _toggle_maximize(self) -> None:
-        """CTk-style work-area fill — same path as MainWindow (not OS showMaximized)."""
+        """CTk-style work-area fill â€” same path as MainWindow (not OS showMaximized)."""
         from ..widgets.titlebar import toggle_work_area_maximize
 
         toggle_work_area_maximize(self)
@@ -2057,11 +1960,11 @@ def _force_cursor_resync() -> None:
 def open_stem_player(parent=None, library_root: Optional[str] = None):
     """Open (or focus) the singleton Stem Player window."""
     global _PLAYER_WINDOW
-    _ensure_player_audio_deps()
+    ensure_player_audio_deps()
     if _PLAYER_WINDOW is not None:
         try:
             # Only reuse a still-living, visible window. After close the HWND is
-            # gone (WA_DeleteOnClose); show() on that instance → CreateWindowEx fail.
+            # gone (WA_DeleteOnClose); show() on that instance â†’ CreateWindowEx fail.
             if _PLAYER_Window_visible(_PLAYER_WINDOW):
                 if library_root and (
                     not _PLAYER_WINDOW._library_root

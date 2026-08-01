@@ -349,7 +349,7 @@ class AudioPlayerBar(QWidget):
             self.play_btn.setToolTip("Play / pause the selected preview file.")
         else:
             self.play_btn.setToolTip(
-                "Audition play needs ffplay.exe (optional). Waveform still works."
+                "Audition needs sounddevice + soundfile (same as STEM Player)."
             )
         self._set_status(f"Loading {path.name}…")
         try:
@@ -358,15 +358,6 @@ class AudioPlayerBar(QWidget):
             self.play_btn.setEnabled(False)
             self._set_status("Audio preview unavailable", subdued=True)
             return
-
-        if not can_play:
-            # Soft note until waveform arrives; _poll will replace with filename.
-            note = getattr(
-                self.service,
-                "playback_unavailable_message",
-                "Waveform only — ffplay optional.",
-            )
-            self._set_status(str(note), subdued=True)
 
     def toggle_playback(self) -> None:
         try:

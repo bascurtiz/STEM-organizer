@@ -221,5 +221,5 @@ def ffmpeg_missing_message() -> str:
         'ffmpeg not found — some stems may fail to decode. '
         'Put ffmpeg.exe and ffprobe.exe in an ffmpeg\\ folder next to the app, '
         'or re-run install-deps.bat / add ffmpeg to PATH. '
-        '(ffplay.exe is optional — Rename audition play only.)'
+        '(Rename audition uses sounddevice like STEM Player — ffplay not required.)'
     )

@@ -112,7 +112,10 @@ hiddenimports += ['classify_backend', 'pair_matcher', 'stem_align',
                   'librosa', 'audioread', 'flac_detective',
                   'track_renamer.engine', 'track_renamer.folder_scanner',
                   'track_renamer.audio_preview', 'track_renamer.instrument_enrich',
-                  'track_renamer.category_palette']
+                  'track_renamer.category_palette',
+                  'stem_organizer.player.audio_io',
+                  'stem_organizer.player.audio_engine',
+                  'stem_organizer.player.track_state']
 hiddenimports += _ort_hidden
 _seen = set()
 for _name in list(iter_ml_stdlib_module_names()) + list(_ML_STDLIB_MODULES):

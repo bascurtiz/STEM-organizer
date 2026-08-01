@@ -1,4 +1,4 @@
-"""FFmpeg-backed waveform extraction and FFplay lifecycle management."""
+"""FFmpeg waveform/duration helpers + sounddevice audition (same stack as STEM Player)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from queue import SimpleQueue
-from typing import Literal
+from typing import Any, Literal
 
 import psutil
 
@@ -30,28 +30,18 @@ if sys.platform == "win32":
 class AudioTools:
     ffmpeg: Path
     ffprobe: Path
-    ffplay: Path | None = None
 
 
 def resolve_audio_tools(project_root: Path | None = None) -> AudioTools | None:
-    """Resolve ffmpeg + ffprobe (required). ffplay is optional (audition only)."""
+    """Resolve ffmpeg + ffprobe for waveform / duration (ffplay not required)."""
     if project_root is None:
         try:
-            from ffmpeg_bootstrap import (
-                ffmpeg_path,
-                ffplay_path,
-                ffprobe_path,
-            )
+            from ffmpeg_bootstrap import ffmpeg_path, ffprobe_path
 
             ffmpeg = ffmpeg_path()
             ffprobe = ffprobe_path()
             if ffmpeg and ffprobe:
-                play = ffplay_path()
-                return AudioTools(
-                    ffmpeg=Path(ffmpeg),
-                    ffprobe=Path(ffprobe),
-                    ffplay=Path(play) if play else None,
-                )
+                return AudioTools(ffmpeg=Path(ffmpeg), ffprobe=Path(ffprobe))
         except ImportError:
             pass
 
@@ -60,24 +50,27 @@ def resolve_audio_tools(project_root: Path | None = None) -> AudioTools | None:
     suffix = ".exe" if sys.platform == "win32" else ""
     ffmpeg_p = bundled / f"ffmpeg{suffix}"
     ffprobe_p = bundled / f"ffprobe{suffix}"
-    ffplay_p = bundled / f"ffplay{suffix}"
     if ffmpeg_p.is_file() and ffprobe_p.is_file():
-        return AudioTools(
-            ffmpeg=ffmpeg_p,
-            ffprobe=ffprobe_p,
-            ffplay=ffplay_p if ffplay_p.is_file() else None,
-        )
+        return AudioTools(ffmpeg=ffmpeg_p, ffprobe=ffprobe_p)
 
     found_ffmpeg = shutil.which("ffmpeg")
     found_ffprobe = shutil.which("ffprobe")
     if found_ffmpeg and found_ffprobe:
-        found_ffplay = shutil.which("ffplay")
         return AudioTools(
             ffmpeg=Path(found_ffmpeg),
             ffprobe=Path(found_ffprobe),
-            ffplay=Path(found_ffplay) if found_ffplay else None,
         )
     return None
+
+
+def _sounddevice_stack_ok() -> bool:
+    try:
+        import sounddevice  # noqa: F401
+        import soundfile  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
 
 
 def reduce_pcm_peaks(samples: array, target_bins: int = 900) -> WaveformPeaks:
@@ -128,7 +121,7 @@ class WaveformCache:
 
 
 class AudioPreviewService:
-    """Own waveform jobs and the single FFplay preview process."""
+    """Waveform via ffmpeg; audition via sounddevice (same as STEM Player)."""
 
     def __init__(
         self,
@@ -147,10 +140,12 @@ class AudioPreviewService:
         self._waveform_lock = threading.Lock()
         self._probe_process: subprocess.Popen[bytes] | None = None
         self._probe_lock = threading.Lock()
-        self._play_process: subprocess.Popen[bytes] | None = None
-        self._paused = False
-        self._position_seconds = 0.0
-        self._play_started_at: float | None = None
+        self._engine: Any = None
+        self._engine_lock = threading.Lock()
+        self._pcm_ready = False
+        self._pcm_error: str | None = None
+        self._play_when_ready = False
+        self._resume_position = 0.0
 
     @property
     def available(self) -> bool:
@@ -159,8 +154,8 @@ class AudioPreviewService:
 
     @property
     def playback_available(self) -> bool:
-        """True when audition play is possible (ffplay present)."""
-        return self.tools is not None and self.tools.ffplay is not None
+        """True when sounddevice + soundfile are importable (STEM Player stack)."""
+        return _sounddevice_stack_ok()
 
     @property
     def unavailable_message(self) -> str:
@@ -168,10 +163,10 @@ class AudioPreviewService:
 
     @property
     def playback_unavailable_message(self) -> str:
-        return "Waveform only — add ffplay.exe for audition play."
+        return "Audition needs sounddevice + soundfile (same as STEM Player)."
 
     def load(self, path: Path) -> int:
-        """Stop current audio and asynchronously load one waveform."""
+        """Stop current audio and asynchronously load waveform + decode for play."""
         self.generation += 1
         generation = self.generation
         self.stop()
@@ -179,6 +174,10 @@ class AudioPreviewService:
         self._cancel_probe()
         self.active_path = path
         self.duration = 0.0
+        self._pcm_ready = False
+        self._pcm_error = None
+        self._play_when_ready = False
+        self._resume_position = 0.0
 
         if not self.available:
             self.events.put((generation, "error", self.unavailable_message))
@@ -191,6 +190,12 @@ class AudioPreviewService:
             args=(generation, path),
             daemon=True,
         ).start()
+        if self.playback_available:
+            threading.Thread(
+                target=self._decode_for_playback,
+                args=(generation, path),
+                daemon=True,
+            ).start()
         try:
             cached = self.cache.get(path)
         except OSError as exc:
@@ -206,6 +211,54 @@ class AudioPreviewService:
             daemon=True,
         ).start()
         return generation
+
+    def _decode_for_playback(self, generation: int, path: Path) -> None:
+        try:
+            from stem_organizer.player.audio_engine import AudioEngine, PLAYER_SR
+            from stem_organizer.player.audio_io import load_player_audio
+            from stem_organizer.player.track_state import TrackState
+        except ImportError as exc:
+            self._pcm_error = str(exc)
+            return
+        try:
+            audio = load_player_audio(str(path), sr=PLAYER_SR, ch=2)
+        except Exception as exc:
+            if generation == self.generation:
+                self._pcm_error = str(exc).splitlines()[0][:160]
+            return
+        if generation != self.generation:
+            return
+        track = TrackState(name=path.name, path=path, audio=audio, color="#a855f7")
+        engine = AudioEngine([track], sr=PLAYER_SR)
+        try:
+            engine.start_stream()
+        except Exception as exc:
+            if generation == self.generation:
+                self._pcm_error = f"Audio output failed: {exc}"
+            return
+        with self._engine_lock:
+            if generation != self.generation:
+                engine.stop_stream()
+                return
+            old = self._engine
+            self._engine = engine
+            self._pcm_ready = True
+            self._pcm_error = None
+            if self.duration <= 0:
+                self.duration = float(engine.duration)
+                self.events.put((generation, "duration", self.duration))
+            play_now = self._play_when_ready
+            resume = self._resume_position
+            self._play_when_ready = False
+        if old is not None:
+            try:
+                old.set_playing(False)
+                old.stop_stream()
+            except Exception:
+                pass
+        if play_now:
+            engine.position = resume
+            engine.set_playing(True)
 
     def _probe_duration(self, generation: int, path: Path) -> None:
         assert self.tools is not None
@@ -367,6 +420,18 @@ class AudioPreviewService:
         except OSError:
             pass
 
+    def _teardown_engine(self) -> None:
+        with self._engine_lock:
+            engine = self._engine
+            self._engine = None
+            self._pcm_ready = False
+        if engine is not None:
+            try:
+                engine.set_playing(False)
+                engine.stop_stream()
+            except Exception:
+                pass
+
     def play_pause(self) -> Literal["playing", "paused", "stopped"]:
         if (
             not self.playback_available
@@ -374,120 +439,96 @@ class AudioPreviewService:
             or not self.active_path.is_file()
         ):
             return "stopped"
-        process = self._play_process
-        if process is not None and process.poll() is None:
-            # Stop the process on pause — do NOT psutil.suspend(). A suspended
-            # ffplay keeps a Windows share lock and blocks rename (WinError 32).
-            self._position_seconds = self.playback_position()
-            self._play_process = None
-            self._play_started_at = None
-            self._terminate_process(process)
-            self._paused = True
-            return "paused"
-        if self._paused:
-            self._paused = False
-            return self._start_playback(self._position_seconds)
-        return self._start_playback(self._position_seconds)
-
-    def _start_playback(
-        self,
-        start_position: float = 0.0,
-    ) -> Literal["playing", "stopped"]:
-        assert self.tools is not None and self.active_path is not None
-        if self.tools.ffplay is None:
+        with self._engine_lock:
+            engine = self._engine
+            ready = self._pcm_ready
+            err = self._pcm_error
+        if err and not ready:
             return "stopped"
-        self.stop()
-        start_position = max(0.0, start_position)
-        command = [
-            str(self.tools.ffplay),
-            "-nodisp",
-            "-autoexit",
-            "-loglevel",
-            "quiet",
-            "-ss",
-            f"{start_position:.3f}",
-            str(self.active_path),
-        ]
-        try:
-            self._play_process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=_CREATE_NO_WINDOW,
-                startupinfo=_STARTUPINFO,
-            )
-            self._paused = False
-            self._position_seconds = start_position
-            self._play_started_at = time.monotonic()
+        if not ready or engine is None:
+            # Decode still in flight — start when ready.
+            self._play_when_ready = True
+            self._resume_position = self.playback_position()
             return "playing"
-        except OSError:
-            self._play_process = None
-            return "stopped"
+        if engine.playing:
+            self._resume_position = float(engine.position)
+            engine.set_playing(False)
+            return "paused"
+        if engine.position >= engine.duration - 0.01:
+            engine.position = 0.0
+        engine.set_playing(True)
+        return "playing"
 
     def playback_state(self) -> Literal["playing", "paused", "stopped"]:
-        process = self._play_process
-        if process is not None and process.poll() is None:
-            return "paused" if self._paused else "playing"
-        # Process exited (end of file) or was stopped for pause-without-hold.
-        self._play_process = None
-        self._play_started_at = None
-        if self._paused and self.active_path is not None:
+        with self._engine_lock:
+            engine = self._engine
+            ready = self._pcm_ready
+            pending = self._play_when_ready
+        if pending and not ready:
+            return "playing"
+        if engine is None or not ready:
+            return "stopped"
+        if engine.playing:
+            return "playing"
+        if engine.position > 0.01 and engine.position < engine.duration - 0.01:
             return "paused"
-        self._paused = False
-        self._position_seconds = 0.0
         return "stopped"
 
     def playback_position(self) -> float:
-        if self._play_started_at is None:
-            return self._position_seconds
-        return self._position_seconds + max(0.0, time.monotonic() - self._play_started_at)
+        with self._engine_lock:
+            engine = self._engine
+            ready = self._pcm_ready
+            resume = self._resume_position
+        if engine is not None and ready:
+            return float(engine.position)
+        return float(resume)
 
     def seek(self, seconds: float) -> float:
+        """Seek to an absolute position in seconds."""
         if self.active_path is None:
             return 0.0
-        state = self.playback_state()
         limit = self.duration if self.duration > 0 else float("inf")
-        target = max(0.0, min(limit, self.playback_position() + seconds))
-        if state == "stopped":
-            self._position_seconds = target
-            return target
-
-        if state == "paused":
-            # Paused holds no live ffplay — only update the resume cursor.
-            self._position_seconds = target
-            self._paused = True
-            self._play_started_at = None
-            return target
-        if self._start_playback(target) != "playing":
-            return self._position_seconds
-        return self.playback_position()
+        target = max(0.0, min(limit, float(seconds)))
+        with self._engine_lock:
+            engine = self._engine
+            ready = self._pcm_ready
+            self._resume_position = target
+        if engine is not None and ready:
+            was_playing = engine.playing
+            engine.position = target
+            if was_playing:
+                engine.set_playing(True)
+        return target
 
     def stop(self) -> None:
-        process = self._play_process
-        self._play_process = None
-        self._paused = False
-        self._position_seconds = 0.0
-        self._play_started_at = None
-        if process is not None and process.poll() is None:
-            self._terminate_process(process)
+        self._play_when_ready = False
+        self._resume_position = 0.0
+        with self._engine_lock:
+            engine = self._engine
+        if engine is not None:
+            try:
+                engine.set_playing(False)
+                engine.position = 0.0
+            except Exception:
+                pass
 
     def reset(self) -> None:
         self.generation += 1
-        self.stop()
+        self._play_when_ready = False
+        self._teardown_engine()
         self._cancel_waveform()
         self._cancel_probe()
         self.active_path = None
         self.duration = 0.0
+        self._pcm_error = None
+        self._resume_position = 0.0
 
     def _kill_orphan_audio_tools(self) -> None:
-        """Kill leftover ffplay/ffmpeg/ffprobe children of this process."""
-        tool_names = {"ffplay", "ffplay.exe", "ffmpeg", "ffmpeg.exe", "ffprobe", "ffprobe.exe"}
+        """Kill leftover ffmpeg/ffprobe children of this process."""
+        tool_names = {"ffmpeg", "ffmpeg.exe", "ffprobe", "ffprobe.exe"}
         if self.tools is not None:
             tool_names.add(self.tools.ffmpeg.name.lower())
             tool_names.add(self.tools.ffprobe.name.lower())
-            if self.tools.ffplay is not None:
-                tool_names.add(self.tools.ffplay.name.lower())
         try:
             children = psutil.Process().children(recursive=True)
         except (psutil.Error, OSError):
@@ -510,18 +551,16 @@ class AudioPreviewService:
         psutil.wait_procs(targets, timeout=1.5)
 
     def release_for_file_ops(self, *, settle_s: float | None = None) -> None:
-        """Stop preview/decode jobs and clear the active path before rename/move.
+        """Stop preview/decode jobs and clear buffers before rename/move.
 
-        ffplay (and in-flight ffmpeg/ffprobe) keep a Windows share lock on the
-        audio file; callers must invoke this before os.rename / shutil.move.
+        Playback uses an in-RAM copy (soundfile/ffmpeg → sounddevice), but
+        in-flight ffmpeg/ffprobe waveform jobs can still hold share locks.
         """
         self.reset()
         self._kill_orphan_audio_tools()
         if settle_s is None:
-            settle_s = 0.35 if sys.platform == "win32" else 0.0
+            settle_s = 0.15 if sys.platform == "win32" else 0.0
         if settle_s > 0:
-            # Windows (and AV) may hold shares briefly after process death —
-            # especially right after Analyze (tagger) touched the same files.
             time.sleep(settle_s)
 
     def shutdown(self) -> None:
