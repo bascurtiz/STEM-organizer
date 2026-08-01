@@ -1,0 +1,24 @@
+PySide6>=6.6,<6.9
+PySide6-Fluent-Widgets>=1.11,<2
+# Default ship path: onnxruntime-gpu (CUDA EP). No torch/demucs in freeze.
+numpy
+scipy
+soundfile
+sounddevice
+# GPU stack pinned to the working freeze (cuDNN 9.24 + CUDA 12.9 wheels
+# match onnxruntime-gpu 1.28). Demucs GPU = CUDA EP only (not DirectML).
+onnxruntime-gpu==1.28.0
+nvidia-cudnn-cu12==9.24.0.43
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cuda-nvrtc-cu12==12.9.86
+psutil
+requests
+librosa
+soxr
+audioread
+# Optional tag writers / metadata
+mutagen
+# Overview compression detect (spectral fake-lossless)
+flac-detective==1.7.0
+Pillow

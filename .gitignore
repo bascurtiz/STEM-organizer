@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.build-venv/
+.cuda-ort-venv/
+.demucs-dml-venv/
+.demucs-export-venv/
+_onnx_spike/.venv*/
+_onnx_spike/.venv-*/
+genre_gender_tagger/venv/
+key_tagger/venv/
+panns_tagger/venv/
+instrument_tagger/venv/
+
+# Build / frozen / smoke
+build/
+dist/
+_smoke/
+*.spec.bak
+
+# Windows redirect mistake
+nul
+
+# Local settings & caches
+settings.json
+overview_scan_cache.json
+python-version.txt
+
+# Tagger run outputs
+genre_gender_tagger/genre_gender_results.csv
+genre_gender_tagger/genre_gender_voice_results.csv
+*_stem_organizer.log
+
+# Downloaded binaries (install-deps / local tools)
+ffmpeg/
+mp3val/
+flac/
+
+# Large ONNX weights — ship via GitHub Release bascurtiz/STEM-organizer-models
+# (tag `models`), not in this source repo.
+models/*.onnx
+panns_tagger/models/*.onnx
+panns_tagger/models/*.pth
+instrument_tagger/models/*.onnx
+key_tagger/checkpoints/*.onnx
+key_tagger/checkpoints/*.pt
+genre_gender_tagger/models/*.onnx
+genre_gender_tagger/models/*.pb
+# Keep tiny sidecars if present
+!genre_gender_tagger/models/*.json
+!genre_gender_tagger/models/*.csv
+!panns_tagger/models/*.csv
+
+# Spike scratch (keep scripts; ignore huge weights / clones if local)
+_onnx_spike/onnx_out/*.onnx
+_onnx_spike/test_track.raw
+_onnx_spike/test_mono.wav
+_onnx_spike/demucs-gsoc/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.zcode/

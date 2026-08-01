@@ -1,0 +1,3 @@
+# Windows batch/cmd scripts require CRLF; LF-only breaks cmd.exe
+*.bat text eol=crlf
+*.cmd text eol=crlf

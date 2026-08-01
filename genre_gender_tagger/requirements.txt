@@ -1,0 +1,35 @@
+# Non-torch dependencies for genre_gender_tagger.py
+#
+# PyTorch is NOT listed here. It is installed separately with the correct
+# CUDA / CPU index URL. See readme.md or run install-deps.bat.
+# torchaudio is not required (librosa resample).
+#
+# This is the SHARED BASE for all four taggers (genre_gender, instrument,
+# panns, key) — they all install into this venv. numpy/soundfile/librosa/
+# soxr/mutagen/tqdm live here so the downstream tagger scripts only add
+# their own extras instead of re-resolving the same base every time.
+#
+# numpy is unpinned: numba 0.66+ supports numpy 2.x (declares <2.5), and the
+# core install already pulls a 2.x wheel. A hard <2.2 cap here previously
+# DOWNGRADED numpy mid-install and left duplicate dist-info dirs.
+
+numpy
+soundfile
+librosa
+soxr
+mutagen
+tqdm
+transformers
+
+# Acapella / voice-gender path (Essentia gender-discogs-effnet).
+# ONNX Runtime + DirectML = GPU on Windows.
+onnxruntime-gpu
+nvidia-cudnn-cu12
+nvidia-cublas-cu12
+nvidia-cuda-runtime-cu12
+nvidia-cuda-nvrtc-cu12
+# CA bundle for Essentia HTTPS downloads on Win11/VMs (CERTIFICATE_VERIFY_FAILED).
+certifi
+
+# Instrument Auto-detect (PaSST) shares this venv — install via
+# instrument_tagger\install-deps.bat (adds hear21passt).

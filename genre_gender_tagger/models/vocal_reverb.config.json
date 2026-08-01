@@ -1,0 +1,1 @@
+{"config": {"sample_rate": 16000, "n_mels": 64, "n_fft": 1024, "hop_length": 256, "clip_seconds": 4.0, "channels": [32, 64, 128]}, "classes": ["dry", "wet"]}
