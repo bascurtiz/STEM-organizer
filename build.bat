@@ -255,7 +255,7 @@ if not exist "%OUT%\models\htdemucs.onnx" (
 
 REM ffmpeg is NOT bundled by the .spec - install-deps.bat downloads it next to the exe after build.
 REM If a local ffmpeg\ already exists (dev machine), copy it for convenience.
-REM Copy ffmpeg.exe + ffprobe.exe only (ffplay.exe ~98 MB is never spawned by the app).
+REM Copy ffmpeg.exe + ffprobe.exe only (ffplay.exe ~98 MB optional — Rename audition).
 if exist "ffmpeg\ffmpeg.exe" if not exist "%OUT%\ffmpeg\ffmpeg.exe" (
     echo   Copying ffmpeg\ ^(ffmpeg.exe + ffprobe.exe only^) ...
     if not exist "%OUT%\ffmpeg" mkdir "%OUT%\ffmpeg" >nul

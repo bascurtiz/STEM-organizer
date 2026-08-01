@@ -29,12 +29,12 @@ if sys.platform == "win32":
 @dataclass(frozen=True, slots=True)
 class AudioTools:
     ffmpeg: Path
-    ffplay: Path
     ffprobe: Path
+    ffplay: Path | None = None
 
 
 def resolve_audio_tools(project_root: Path | None = None) -> AudioTools | None:
-    """Resolve an explicit bundle, STEM's shared tools, then PATH."""
+    """Resolve ffmpeg + ffprobe (required). ffplay is optional (audition only)."""
     if project_root is None:
         try:
             from ffmpeg_bootstrap import (
@@ -43,16 +43,14 @@ def resolve_audio_tools(project_root: Path | None = None) -> AudioTools | None:
                 ffprobe_path,
             )
 
-            shared = {
-                "ffmpeg": ffmpeg_path(),
-                "ffplay": ffplay_path(),
-                "ffprobe": ffprobe_path(),
-            }
-            if all(shared.values()):
+            ffmpeg = ffmpeg_path()
+            ffprobe = ffprobe_path()
+            if ffmpeg and ffprobe:
+                play = ffplay_path()
                 return AudioTools(
-                    ffmpeg=Path(shared["ffmpeg"]),
-                    ffplay=Path(shared["ffplay"]),
-                    ffprobe=Path(shared["ffprobe"]),
+                    ffmpeg=Path(ffmpeg),
+                    ffprobe=Path(ffprobe),
+                    ffplay=Path(play) if play else None,
                 )
         except ImportError:
             pass
@@ -60,19 +58,24 @@ def resolve_audio_tools(project_root: Path | None = None) -> AudioTools | None:
     root = project_root or Path(__file__).resolve().parents[1]
     bundled = root / "ffmpeg"
     suffix = ".exe" if sys.platform == "win32" else ""
-    bundled_paths = {
-        name: bundled / f"{name}{suffix}"
-        for name in ("ffmpeg", "ffplay", "ffprobe")
-    }
-    if all(path.is_file() for path in bundled_paths.values()):
-        return AudioTools(**bundled_paths)
-
-    discovered = {name: shutil.which(name) for name in bundled_paths}
-    if all(discovered.values()):
+    ffmpeg_p = bundled / f"ffmpeg{suffix}"
+    ffprobe_p = bundled / f"ffprobe{suffix}"
+    ffplay_p = bundled / f"ffplay{suffix}"
+    if ffmpeg_p.is_file() and ffprobe_p.is_file():
         return AudioTools(
-            ffmpeg=Path(discovered["ffmpeg"]),
-            ffplay=Path(discovered["ffplay"]),
-            ffprobe=Path(discovered["ffprobe"]),
+            ffmpeg=ffmpeg_p,
+            ffprobe=ffprobe_p,
+            ffplay=ffplay_p if ffplay_p.is_file() else None,
+        )
+
+    found_ffmpeg = shutil.which("ffmpeg")
+    found_ffprobe = shutil.which("ffprobe")
+    if found_ffmpeg and found_ffprobe:
+        found_ffplay = shutil.which("ffplay")
+        return AudioTools(
+            ffmpeg=Path(found_ffmpeg),
+            ffprobe=Path(found_ffprobe),
+            ffplay=Path(found_ffplay) if found_ffplay else None,
         )
     return None
 
@@ -151,11 +154,21 @@ class AudioPreviewService:
 
     @property
     def available(self) -> bool:
+        """True when waveform/duration tools (ffmpeg + ffprobe) are present."""
         return self.tools is not None
 
     @property
+    def playback_available(self) -> bool:
+        """True when audition play is possible (ffplay present)."""
+        return self.tools is not None and self.tools.ffplay is not None
+
+    @property
     def unavailable_message(self) -> str:
-        return "Add ffmpeg, ffplay, and ffprobe to the ffmpeg folder."
+        return "Add ffmpeg and ffprobe to the ffmpeg folder (or re-run install-deps.bat)."
+
+    @property
+    def playback_unavailable_message(self) -> str:
+        return "Waveform only — add ffplay.exe for audition play."
 
     def load(self, path: Path) -> int:
         """Stop current audio and asynchronously load one waveform."""
@@ -355,7 +368,11 @@ class AudioPreviewService:
             pass
 
     def play_pause(self) -> Literal["playing", "paused", "stopped"]:
-        if not self.available or self.active_path is None or not self.active_path.is_file():
+        if (
+            not self.playback_available
+            or self.active_path is None
+            or not self.active_path.is_file()
+        ):
             return "stopped"
         process = self._play_process
         if process is not None and process.poll() is None:
@@ -377,6 +394,8 @@ class AudioPreviewService:
         start_position: float = 0.0,
     ) -> Literal["playing", "stopped"]:
         assert self.tools is not None and self.active_path is not None
+        if self.tools.ffplay is None:
+            return "stopped"
         self.stop()
         start_position = max(0.0, start_position)
         command = [
@@ -465,13 +484,10 @@ class AudioPreviewService:
         """Kill leftover ffplay/ffmpeg/ffprobe children of this process."""
         tool_names = {"ffplay", "ffplay.exe", "ffmpeg", "ffmpeg.exe", "ffprobe", "ffprobe.exe"}
         if self.tools is not None:
-            tool_names.update(
-                {
-                    self.tools.ffplay.name.lower(),
-                    self.tools.ffmpeg.name.lower(),
-                    self.tools.ffprobe.name.lower(),
-                }
-            )
+            tool_names.add(self.tools.ffmpeg.name.lower())
+            tool_names.add(self.tools.ffprobe.name.lower())
+            if self.tools.ffplay is not None:
+                tool_names.add(self.tools.ffplay.name.lower())
         try:
             children = psutil.Process().children(recursive=True)
         except (psutil.Error, OSError):

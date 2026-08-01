@@ -219,6 +219,7 @@ def ffplay_path() -> str | None:
 def ffmpeg_missing_message() -> str:
     return (
         'ffmpeg not found — some stems may fail to decode. '
-        'Put ffmpeg.exe, ffprobe.exe, and ffplay.exe in an ffmpeg\\ folder next to the app, '
-        'or re-run install-deps.bat / add ffmpeg to PATH.'
+        'Put ffmpeg.exe and ffprobe.exe in an ffmpeg\\ folder next to the app, '
+        'or re-run install-deps.bat / add ffmpeg to PATH. '
+        '(ffplay.exe is optional — Rename audition play only.)'
     )

@@ -338,17 +338,35 @@ class AudioPlayerBar(QWidget):
             except Exception:
                 pass
             self.play_btn.setEnabled(False)
+            self.play_btn.setToolTip("Add ffmpeg and ffprobe to preview audio.")
             msg = getattr(self.service, "unavailable_message", "Audio preview unavailable")
             self._set_status(str(msg), subdued=True)
             return
 
-        self.play_btn.setEnabled(True)
+        can_play = bool(getattr(self.service, "playback_available", True))
+        self.play_btn.setEnabled(can_play)
+        if can_play:
+            self.play_btn.setToolTip("Play / pause the selected preview file.")
+        else:
+            self.play_btn.setToolTip(
+                "Audition play needs ffplay.exe (optional). Waveform still works."
+            )
         self._set_status(f"Loading {path.name}…")
         try:
             self.service.load(path)
         except Exception:
             self.play_btn.setEnabled(False)
             self._set_status("Audio preview unavailable", subdued=True)
+            return
+
+        if not can_play:
+            # Soft note until waveform arrives; _poll will replace with filename.
+            note = getattr(
+                self.service,
+                "playback_unavailable_message",
+                "Waveform only — ffplay optional.",
+            )
+            self._set_status(str(note), subdued=True)
 
     def toggle_playback(self) -> None:
         try:
@@ -475,6 +493,11 @@ class AudioPlayerBar(QWidget):
                 self.wave.set_peaks(payload)
                 if self.active_track is not None:
                     self._set_status(getattr(self.active_track, "display_name", "") or "")
+                # Keep play gated on ffplay even after waveform loads.
+                can_play = bool(getattr(self.service, "playback_available", True))
+                self.play_btn.setEnabled(
+                    can_play and self.active_track is not None
+                )
             elif event_type == "duration":
                 self.wave.set_duration(float(payload))
             else:
