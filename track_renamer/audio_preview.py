@@ -500,6 +500,10 @@ class AudioPreviewService:
                 engine.set_playing(True)
         return target
 
+    def seek_relative(self, delta: float) -> float:
+        """Seek by a relative offset in seconds (keyboard Left/Right)."""
+        return self.seek(self.playback_position() + float(delta))
+
     def stop(self) -> None:
         self._play_when_ready = False
         self._resume_position = 0.0

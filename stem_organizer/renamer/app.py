@@ -1076,7 +1076,8 @@ class TrackRenamerApp(QWidget):
     def _seek_audio_preview(self, seconds: float) -> None:
         if self._destructive_busy:
             return
-        self.audio_player.seek(seconds)
+        # PreviewPanel Left/Right send relative ±3s offsets.
+        self.audio_player.seek_relative(seconds)
 
     # ----- busy / status -----
 

@@ -367,10 +367,24 @@ class AudioPlayerBar(QWidget):
         self._apply_playback_state(state)
 
     def seek(self, seconds: float) -> None:
+        """Seek to an absolute time (waveform click)."""
         if self.active_track is None:
             return
         try:
             self.service.seek(seconds)
+        except Exception:
+            pass
+        try:
+            self.wave.set_position(self.service.playback_position() or 0.0)
+        except Exception:
+            self.wave.update()
+
+    def seek_relative(self, delta: float) -> None:
+        """Seek by relative offset (keyboard Left/Right ±3s)."""
+        if self.active_track is None:
+            return
+        try:
+            self.service.seek_relative(delta)
         except Exception:
             pass
         try:
