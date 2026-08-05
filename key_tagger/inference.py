@@ -66,23 +66,35 @@ StopFn = Callable[[], bool]
 
 
 def resolve_device(preferred: str = "") -> str:
+    """Pick cuda|cpu. ONNX path uses ORT CUDA EP (no torch required)."""
     pref = (preferred or "").strip().lower()
-    if pref in ("cuda", "cpu"):
-        if pref == "cuda":
-            try:
-                import torch
+    onnx_mode = os.environ.get("STEM_ONNX", "1").strip() != "0"
 
-                if not torch.cuda.is_available():
-                    return "cpu"
-            except ImportError:
-                return "cpu"
-        return pref
-    try:
-        import torch
+    def _ort_cuda() -> bool:
+        try:
+            from ort_util import cuda_ep_usable
 
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except ImportError:
+            return bool(cuda_ep_usable())
+        except Exception:
+            return False
+
+    def _torch_cuda() -> bool:
+        try:
+            import torch
+
+            return bool(torch.cuda.is_available())
+        except ImportError:
+            return False
+
+    if pref == "cpu":
         return "cpu"
+    if pref == "cuda":
+        if onnx_mode:
+            return "cuda" if _ort_cuda() else "cpu"
+        return "cuda" if _torch_cuda() else "cpu"
+    if onnx_mode:
+        return "cuda" if _ort_cuda() else "cpu"
+    return "cuda" if _torch_cuda() else "cpu"
 
 
 def load_model(checkpoint: Path | str, device: str) -> Any:
@@ -121,16 +133,13 @@ class KeyNetOnnx:
     """ONNX Runtime backend — numpy in, numpy logits out (torch-free)."""
 
     def __init__(self, onnx_path: Path, device: str = ""):
-        import onnxruntime as ort
+        from ort_util import create_ort_session
 
-        providers = []
-        # Prefer CPU for KeyNet unless explicitly on a GPU device string.
-        # (Small model; avoids DML surprises. Pass device=cpu to force.)
-        if (device or "").strip().lower() not in ("", "cpu", "onnx"):
-            providers.append("DmlExecutionProvider")
-        providers.append("CPUExecutionProvider")
-        self.session = ort.InferenceSession(str(onnx_path), providers=providers)
-        self.device = device or "onnx"
+        self.session = create_ort_session(onnx_path, device=device or "")
+        providers = list(self.session.get_providers())
+        self.device = (
+            "cuda" if "CUDAExecutionProvider" in providers else "cpu"
+        )
         self.backend = "onnx"
 
     def __call__(self, x: np.ndarray | Any) -> np.ndarray:
@@ -149,11 +158,31 @@ class KeyNetOnnx:
         return self
 
 
+def _load_mono(path_s: str) -> tuple[np.ndarray, int]:
+    """Decode via soundfile + soxr; fall back to librosa for exotic codecs."""
+    try:
+        import soundfile as sf
+
+        data, sr = sf.read(path_s, always_2d=True, dtype="float32")
+        mono = data.mean(axis=1)
+        if int(sr) != SAMPLE_RATE:
+            mono = librosa.resample(
+                mono,
+                orig_sr=int(sr),
+                target_sr=SAMPLE_RATE,
+                res_type="soxr_hq",
+            )
+        return np.ascontiguousarray(mono, dtype=np.float32), SAMPLE_RATE
+    except Exception:
+        waveform, sr = librosa.load(path_s, sr=SAMPLE_RATE, mono=True)
+        return np.asarray(waveform, dtype=np.float32), int(sr)
+
+
 def preproc(path: Path | str) -> tuple[str, Optional[np.ndarray], Optional[str]]:
     """Return (path, cqt_or_None, error_or_None)."""
     path_s = str(path)
     try:
-        waveform, sr = librosa.load(path_s, sr=SAMPLE_RATE, mono=True)
+        waveform, sr = _load_mono(path_s)
     except Exception as exc:
         return path_s, None, f"decode failed: {exc}"
     if waveform is None or len(waveform) == 0:
@@ -162,7 +191,7 @@ def preproc(path: Path | str) -> tuple[str, Optional[np.ndarray], Optional[str]]
         return path_s, None, "too short (< 8 s)"
     try:
         cqt = librosa.cqt(
-            waveform.astype(np.float32),
+            waveform.astype(np.float32, copy=False),
             sr=SAMPLE_RATE,
             hop_length=HOP_LENGTH,
             n_bins=N_BINS,
@@ -204,7 +233,13 @@ def _pool_worker_init() -> None:
 
 
 def default_cqt_workers() -> int:
-    """Parallel CQT without pegging every core (BLAS was oversubscribing)."""
+    """Parallel CQT workers. ``KEY_CQT_WORKERS`` overrides (from io_tune)."""
+    raw = os.environ.get("KEY_CQT_WORKERS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
     cpus = os.cpu_count() or 4
     return max(2, min(8, cpus // 2))
 
@@ -337,6 +372,7 @@ def process_batched(
                 maybe_emit(pth)
             return results
 
+        # ProcessPool: librosa CQT is GIL-bound — threads don't scale.
         ctx = mp.get_context("spawn")
         pool = ctx.Pool(
             processes=n_workers,
@@ -345,7 +381,7 @@ def process_batched(
         try:
             done = 0
             for path_s, data, err in pool.imap_unordered(
-                _preproc_worker, path_strs, chunksize=1
+                _preproc_worker, path_strs, chunksize=4
             ):
                 if stop_check and stop_check():
                     break

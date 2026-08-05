@@ -7,6 +7,7 @@ and ``__progress__`` markers, emits Qt signals for the Genre & Gender tab.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -25,6 +26,7 @@ from tagger_launch import (
     tagger_subprocess_env,
 )
 
+from ..io_tune import ensure_tuned
 from .tagger_worker import format_tagger_exit, gg_log_tag
 
 _FOCUS = ("Singing", "Speech", "Rapping", "Humming", "Choir")
@@ -147,7 +149,40 @@ class PannsWorker(QThread):
         if self._batch_mode:
             script_args.append("--batch")
 
+        on_gpu = False
+        try:
+            from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+            on_gpu = bool(
+                os.environ.get("STEM_ORT_CUDA", "1").strip() != "0"
+                and cuda_ep_usable()
+                and nvidia_gpu_present()
+            )
+        except Exception:
+            on_gpu = False
+        script_args.extend(["--device", "cuda" if on_gpu else "cpu"])
+
         env = tagger_subprocess_env()
+        if self._batch_mode and not self._segment_sec:
+
+            def _tune_log(msg: str, tag: str = "info") -> None:
+                self.log_line.emit(msg, tag)
+
+            hint = ensure_tuned(
+                input_dir,
+                workload="panns",
+                log=_tune_log,
+                inference_on_gpu=on_gpu,
+            )
+            env.setdefault("PANNS_AUDIO_WORKERS", str(hint.audio_workers))
+            env.setdefault("PANNS_BATCH_SIZE", str(hint.gpu_batch_size))
+            if not on_gpu:
+                env.setdefault("OMP_NUM_THREADS", "1")
+                env.setdefault("MKL_NUM_THREADS", "1")
+                env.setdefault("OPENBLAS_NUM_THREADS", "1")
+                env.setdefault("NUMEXPR_NUM_THREADS", "1")
+                env.setdefault("STEM_ORT_INTRA_OP", "2")
+
         self._progress_t0 = time.monotonic()
         try:
             self._proc = subprocess.Popen(

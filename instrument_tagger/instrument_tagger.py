@@ -214,6 +214,9 @@ class _PasstOpenmicBackend:
         self.device = device
 
     def predict(self, audio: np.ndarray) -> np.ndarray:
+        return self._predict_one(audio)
+
+    def _predict_one(self, audio: np.ndarray) -> np.ndarray:
         import torch
 
         if audio.size == 0:
@@ -223,18 +226,24 @@ class _PasstOpenmicBackend:
         self.model.eval()
         with torch.no_grad():
             logits = self.model.get_scene_embeddings(tensor)
-            # mode=logits → (1, 20)
             if logits.ndim == 1:
                 logits = logits.unsqueeze(0)
             probs = torch.sigmoid(logits).detach().float().cpu().numpy()[0]
         return probs.astype(np.float32, copy=False)
 
+    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
+        """Sequential torch predict (no fused batch API on the wrapper)."""
+        if not audios:
+            return np.zeros((0, len(OPENMIC_INSTRUMENTS)), dtype=np.float32)
+        return np.stack([self._predict_one(a) for a in audios], axis=0)
+
 
 class _PasstOpenmicBackendOnnx:
     """ONNX Runtime drop-in for _PasstOpenmicBackend.
 
-    Same public API (``predict`` / ``name`` / ``device``). Mel is numpy
-    (``passt_mel_np``); the ViT net is the ONNX graph — no hear21passt/torch.
+    Same public API (``predict`` / ``predict_batch`` / ``name`` / ``device``).
+    Mel is numpy (``passt_mel_np``); the ViT net is the ONNX graph — no
+    hear21passt/torch.
     """
 
     name = "passt-openmic"
@@ -253,18 +262,61 @@ class _PasstOpenmicBackendOnnx:
 
         self.session = create_ort_session(onnx_path, device=device or "")
         self.device = device or "onnx"
+        # Expose active EP for logging (cuda vs cpu).
+        try:
+            providers = self.session.get_providers()
+            if "CUDAExecutionProvider" in providers:
+                self.device = "cuda"
+            elif providers:
+                self.device = str(providers[0]).replace("ExecutionProvider", "").lower()
+        except Exception:
+            pass
 
     def predict(self, audio: np.ndarray) -> np.ndarray:
-        from passt_mel_np import passt_mel_numpy
+        return self.predict_batch([audio])[0]
 
-        if audio.size == 0:
-            return np.zeros(len(OPENMIC_INSTRUMENTS), dtype=np.float32)
-        audio = _pad_clip(audio)
-        mel = passt_mel_numpy(audio)  # (1, 128, 998)
+    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
+        """Batch mel + one ORT ``session.run``. Returns (N, 20) float32."""
+        try:
+            from passt_mel_np import passt_mel_numpy
+        except ImportError:
+            from instrument_tagger.passt_mel_np import passt_mel_numpy
+
+        n = len(audios)
+        if n == 0:
+            return np.zeros((0, len(OPENMIC_INSTRUMENTS)), dtype=np.float32)
+        clips: list[np.ndarray] = []
+        empty_idx: list[int] = []
+        for i, audio in enumerate(audios):
+            if audio is None or getattr(audio, "size", 0) == 0:
+                empty_idx.append(i)
+                clips.append(np.zeros(CLIP_SAMPLES, dtype=np.float32))
+            else:
+                clips.append(_pad_clip(np.asarray(audio, dtype=np.float32)))
+        stacked = np.stack(clips, axis=0)
+        mel = passt_mel_numpy(stacked)  # (N, 128, 998)
         mel_in = np.ascontiguousarray(mel[:, None, :, :], dtype=np.float32)
-        logits = self.session.run(["logits"], {"mel": mel_in})[0][0]
-        probs = 1.0 / (1.0 + np.exp(-logits))
-        return probs.astype(np.float32, copy=False)
+        logits = self.session.run(["logits"], {"mel": mel_in})[0]
+        probs = (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+        for i in empty_idx:
+            probs[i] = 0.0
+        return probs
+
+
+def _passt_batch_size() -> int:
+    raw = os.environ.get("PASST_BATCH_SIZE", "8").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 8
+
+
+def _passt_audio_workers() -> int:
+    raw = os.environ.get("PASST_AUDIO_WORKERS", "2").strip()
+    try:
+        return max(1, min(8, int(raw)))
+    except ValueError:
+        return 2
 
 
 def _resolve_passt_onnx() -> Path | None:
@@ -292,6 +344,10 @@ def load_backend(status=_status) -> _PasstOpenmicBackend | _PasstOpenmicBackendO
                 status(f"  loading PaSST OpenMIC (onnxruntime)...")
                 backend = _PasstOpenmicBackendOnnx(onnx_path, device="")
                 status(f"  device: {backend.device}")
+                try:
+                    backend.predict(np.zeros(CLIP_SAMPLES, dtype=np.float32))
+                except Exception:
+                    pass
                 return backend
 
     import torch
@@ -543,28 +599,77 @@ def main(argv: list[str] | None = None) -> int:
 
     _status(f"Instrument tagger (PaSST OpenMIC) — {len(files)} file(s)")
     backend = load_backend(status=_status)
+    batch_size = _passt_batch_size()
+    audio_workers = _passt_audio_workers()
     _status(f"  backend: {backend.name}")
+    _status(f"  batch={batch_size} decode_workers={audio_workers}")
     _status("")
 
-    errors = 0
-    for i, path in enumerate(files, 1):
-        _status(f"[{i}/{len(files)}] {path.name}")
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _safe_load(path: Path):
         try:
-            result = classify_file(
-                path,
-                backend,
-                top_k=args.top,
-                threshold=args.threshold,
-            )
-            _print_json(result)
+            return path, load_mono_32k(path), None
         except Exception as exc:
-            errors += 1
-            _print_json(
-                {
-                    "path": str(path.resolve()),
-                    "error": str(exc),
-                }
-            )
+            return path, None, str(exc)
+
+    errors = 0
+    predict_batch = getattr(backend, "predict_batch", None)
+
+    def _load_chunk(paths: list[Path]):
+        return list(pool.map(_safe_load, paths))
+
+    def _emit_chunk(loaded) -> None:
+        nonlocal errors
+        ok_paths: list[Path] = []
+        ok_audios: list[np.ndarray] = []
+        for path, audio, err in loaded:
+            if err is not None or audio is None:
+                errors += 1
+                _print_json({"path": str(path.resolve()), "error": err or "load failed"})
+                continue
+            ok_paths.append(path)
+            ok_audios.append(audio)
+        if not ok_audios:
+            return
+        try:
+            if callable(predict_batch):
+                probs_batch = predict_batch(ok_audios)
+            else:
+                probs_batch = np.stack([backend.predict(a) for a in ok_audios], axis=0)
+        except Exception as exc:
+            for path, audio in zip(ok_paths, ok_audios):
+                try:
+                    probs = backend.predict(audio)
+                    result = probs_to_result(
+                        probs, top_k=args.top, threshold=args.threshold
+                    )
+                    result["path"] = str(path.resolve())
+                    _print_json(result)
+                except Exception as exc2:
+                    errors += 1
+                    _print_json({"path": str(path.resolve()), "error": str(exc2)})
+            _status(f"  [warn] batch infer failed ({exc}); fell back per-file")
+            return
+        for path, probs in zip(ok_paths, probs_batch):
+            result = probs_to_result(probs, top_k=args.top, threshold=args.threshold)
+            result["path"] = str(path.resolve())
+            _print_json(result)
+
+    with ThreadPoolExecutor(max_workers=audio_workers) as pool:
+        starts = list(range(0, len(files), batch_size))
+        next_fut = None
+        for i, start in enumerate(starts):
+            chunk = files[start : start + batch_size]
+            if next_fut is not None:
+                loaded = next_fut.result()
+                next_fut = None
+            else:
+                loaded = _load_chunk(chunk)
+            if i + 1 < len(starts):
+                next_chunk = files[starts[i + 1] : starts[i + 1] + batch_size]
+                next_fut = pool.submit(_load_chunk, next_chunk)
+            _emit_chunk(loaded)
 
     _status(f"done. ok={len(files) - errors} err={errors}")
     return 1 if errors else 0

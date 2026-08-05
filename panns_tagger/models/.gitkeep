@@ -1,0 +1,2 @@
+# Place optional Cnn14_mAP=0.431.pth here to skip the first-run download.
+# Otherwise panns_inference fetches it into ~/panns_data (then we copy here).

@@ -311,7 +311,9 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     model = load_model(ckpt, device)
-    print("  Model ready.", flush=True)
+    backend = getattr(model, "backend", "torch")
+    actual = getattr(model, "device", device)
+    print(f"  Model ready ({backend}, {actual}).", flush=True)
     print("", flush=True)
     t0 = time.monotonic()
     written = skipped = errors = 0

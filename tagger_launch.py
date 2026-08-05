@@ -368,6 +368,18 @@ def maybe_run_tagger_dispatch(argv: list[str] | None = None) -> int | None:
         if isinstance(code, int):
             return code
         return 1
+    except BaseException as exc:
+        # Keep the host EXE alive — show a clean failure instead of PyInstaller's
+        # "Unhandled exception in script" dialog for tagger OOMs / crashes.
+        import traceback
+
+        print(
+            f"\nERROR: tagger crashed ({type(exc).__name__}): {exc}\n",
+            file=sys.stderr,
+            flush=True,
+        )
+        traceback.print_exc()
+        return 1
     return 0
 
 

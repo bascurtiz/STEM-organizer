@@ -41,7 +41,7 @@ def _candidate_workers(cpu: int) -> tuple[int, ...]:
 
 
 LogFn = Callable[[str, str], None]
-Workload = Literal["genre", "gender", "compression", "corruption"]
+Workload = Literal["genre", "gender", "compression", "corruption", "key", "panns"]
 
 
 @dataclass(frozen=True)
@@ -194,21 +194,81 @@ def probe_decode_workers(
     )
 
 
-def hint_for_workload(workers: int, workload: Workload, *, volume: str = "", fps: float = 0.0, probed: bool = True) -> ParallelismHint:
+def hint_for_workload(
+    workers: int,
+    workload: Workload,
+    *,
+    volume: str = "",
+    fps: float = 0.0,
+    probed: bool = True,
+    inference_on_gpu: bool = True,
+) -> ParallelismHint:
+    """Map decode-probe workers → tagger/integrity parallelism.
+
+    Decode probe optimizes disk throughput only. Genre MAEST (AST) cannot use
+    GPU-era batch=64: 64 files × 3 clips ≈ 192 sequences OOMs Softmax (~26 GB).
+    Gender EffNet stays batch-64 (fixed ONNX pad).
+    """
     w = max(1, int(workers))
-    file_chunk = max(64, min(256, w * 32))
-    if workload == "gender":
-        file_chunk = max(file_chunk, 128)
-    process_workers = max(2, min(_MAX_WORKERS, w))
+    message = ""
+    if workload == "genre":
+        # MAEST VRAM / CPU: small file batches only (clips = files × 3).
+        if inference_on_gpu:
+            w = min(w, 4)
+            gpu_batch = 4
+            file_chunk = max(16, min(32, w * 8))
+            message = (
+                f"MAEST VRAM cap: workers={w} batch={gpu_batch} "
+                f"file_chunk={file_chunk} (64×3 clips OOMs ~26 GB Softmax)"
+            )
+        else:
+            w = min(w, 2)
+            gpu_batch = 4
+            file_chunk = max(16, min(32, w * 16))
+            message = (
+                f"CPU MAEST throttle: workers={w} batch={gpu_batch} "
+                f"file_chunk={file_chunk}"
+            )
+    elif workload == "key":
+        # CQT is CPU-bound; probe workers help decode+CQT, cap at 8.
+        w = min(w, 8)
+        file_chunk = max(32, min(128, w * 16))
+        gpu_batch = 320  # KeyNet batch (unused by env; kept for ParallelismHint)
+        message = f"Key CQT workers={w}"
+    elif workload == "panns":
+        # Cnn14 FE is in-graph — keep GPU batches small (VRAM).
+        if inference_on_gpu:
+            w = min(w, 4)
+            gpu_batch = 4
+        else:
+            w = min(w, 2)
+            gpu_batch = 2
+        file_chunk = max(16, min(64, w * 8))
+        message = f"PANNs workers={w} batch={gpu_batch}"
+    elif workload == "gender" and not inference_on_gpu:
+        w = min(w, 2)
+        file_chunk = max(32, min(64, w * 32))
+        gpu_batch = 64  # EffNet ONNX fixed pad
+        message = (
+            f"CPU gender throttle: workers={w} batch={gpu_batch} "
+            f"file_chunk={file_chunk}"
+        )
+    else:
+        # gender on GPU (EffNet) or integrity workloads
+        file_chunk = max(64, min(256, w * 32))
+        if workload == "gender":
+            file_chunk = max(file_chunk, 128)
+        gpu_batch = 64
+    process_workers = max(2, min(_MAX_WORKERS, max(1, int(workers))))
     return ParallelismHint(
         audio_workers=w,
-        gpu_batch_size=64,
+        gpu_batch_size=gpu_batch,
         file_chunk=file_chunk,
         process_workers=process_workers,
         volume=volume,
         files_per_sec=fps,
         probed=probed,
-        message="",
+        message=message,
     )
 
 
@@ -246,6 +306,7 @@ def ensure_tuned(
     workload: Workload = "genre",
     force: bool = False,
     log: Optional[LogFn] = None,
+    inference_on_gpu: bool = True,
 ) -> ParallelismHint:
     """Return parallelism hint for folder's volume; probe + cache on miss."""
     key = volume_key(folder)
@@ -268,10 +329,16 @@ def ensure_tuned(
                 workers = _DEFAULT_WORKERS
             fps = float(entry.get("fps") or 0.0)
             hint = hint_for_workload(
-                workers, workload, volume=key, fps=fps, probed=True
+                workers,
+                workload,
+                volume=key,
+                fps=fps,
+                probed=True,
+                inference_on_gpu=inference_on_gpu,
             )
+            extra = f" — {hint.message}" if hint.message else ""
             _emit(
-                f"  Quick tune ({key}): workers={hint.audio_workers} (cached)",
+                f"  Quick tune ({key}): workers={hint.audio_workers} (cached){extra}",
                 "info",
             )
             return hint
@@ -284,6 +351,7 @@ def ensure_tuned(
         volume=key,
         fps=result.files_per_sec,
         probed=result.probed,
+        inference_on_gpu=inference_on_gpu,
     )
 
     if result.probed:
@@ -294,9 +362,11 @@ def ensure_tuned(
             f"  Quick tune ({key}): workers={hint.audio_workers}"
             f" ({parts})"
         )
+        if hint.message:
+            msg += f" — {hint.message}"
         cache[key] = {
             "v": _CACHE_VERSION,
-            "workers": hint.audio_workers,
+            "workers": int(result.workers),  # cache raw probe; throttle at hint time
             "fps": round(result.files_per_sec, 3),
             "tried": {str(k): round(v, 3) for k, v in result.tried.items()},
             "sample_count": result.sample_count,
@@ -309,5 +379,7 @@ def ensure_tuned(
             f"(fallback — only {result.sample_count} readable sample"
             f"{'' if result.sample_count == 1 else 's'})"
         )
+        if hint.message:
+            msg += f" — {hint.message}"
     _emit(msg, "info")
     return hint

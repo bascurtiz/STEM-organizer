@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import threading
@@ -17,7 +16,7 @@ from typing import Any, Literal
 import psutil
 
 WaveformPeaks = tuple[tuple[float, float], ...]
-AudioEvent = tuple[int, Literal["waveform", "duration", "error"], object]
+AudioEvent = tuple[int, Literal["waveform", "duration", "error", "tools_ready"], object]
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _STARTUPINFO = None
@@ -53,13 +52,11 @@ def resolve_audio_tools(project_root: Path | None = None) -> AudioTools | None:
     if ffmpeg_p.is_file() and ffprobe_p.is_file():
         return AudioTools(ffmpeg=ffmpeg_p, ffprobe=ffprobe_p)
 
-    found_ffmpeg = shutil.which("ffmpeg")
-    found_ffprobe = shutil.which("ffprobe")
-    if found_ffmpeg and found_ffprobe:
-        return AudioTools(
-            ffmpeg=Path(found_ffmpeg),
-            ffprobe=Path(found_ffprobe),
-        )
+    # No raw shutil.which fallback: on Windows that picks the crippled
+    # Microsoft Store alias in %LOCALAPPDATA%\Microsoft\WindowsApps (a gutted
+    # ffmpeg with no pcm_f32le encoder), which fails with
+    # "Error opening output files: Encoder not found". ffmpeg_bootstrap above
+    # already scans every PATH entry and skips those stubs.
     return None
 
 
@@ -146,11 +143,48 @@ class AudioPreviewService:
         self._pcm_error: str | None = None
         self._play_when_ready = False
         self._resume_position = 0.0
+        self._tools_downloading = False
 
     @property
     def available(self) -> bool:
         """True when waveform/duration tools (ffmpeg + ffprobe) are present."""
         return self.tools is not None
+
+    def ensure_tools_async(self) -> int:
+        """Download ffmpeg/ffprobe in a background thread if missing.
+
+        Emits a ``("tools_ready", ok)`` event when the attempt completes so the
+        playbar can reload the active track. One download attempt per process
+        (``ffmpeg_bootstrap.ensure_ffmpeg`` guards further retries).
+        """
+        generation = self.generation
+        if self.tools is not None:
+            self.events.put((generation, "tools_ready", True))
+            return generation
+        if self._tools_downloading:
+            return generation
+
+        def _run() -> None:
+            ok = False
+            try:
+                from ffmpeg_bootstrap import ensure_ffmpeg
+
+                ok = ensure_ffmpeg() is not None
+            except Exception:
+                ok = False
+            self._tools_downloading = False
+            if ok:
+                try:
+                    self.tools = resolve_audio_tools()
+                except Exception:
+                    self.tools = None
+            # Emit with the CURRENT generation so the event is never dropped if
+            # the user switched tracks mid-download (each selection bumps it).
+            self.events.put((self.generation, "tools_ready", bool(ok and self.tools)))
+
+        self._tools_downloading = True
+        threading.Thread(target=_run, daemon=True).start()
+        return generation
 
     @property
     def playback_available(self) -> bool:

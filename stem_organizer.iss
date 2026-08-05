@@ -16,18 +16,21 @@
 #define MyAppSource "dist\STEM-organizer"
 
 ; --- Model weights: fetched from a GitHub Release at install time (not bundled) ---
-; The 8 .onnx files (~1.36 GB raw / ~435 MB compressed) are excluded from the
+; The 9 .onnx files (~1.4 GB raw) are excluded from the
 ; installer and downloaded during install from the GitHub release tagged below.
 ; Sidecars (.json/.csv, ~30 KB total) are tiny and stay bundled.
 ;
 ; RELEASE WORKFLOW (once — weights are version-stable):
 ;   1. Tag a release on GitHub:  models  (= ModelsReleaseTag below; no app version).
-;   2. Upload the 8 .onnx files as release assets (each < 2 GB).
+;   2. Upload the 9 .onnx files as release assets (each < 2 GB).
+;      Demucs: ship the dynamic-batch graph as asset ``htdemucs.batch.onnx``;
+;      install DestName is still ``htdemucs.onnx`` (resolver + session cache).
 ;   3. Asset URL pattern:  https://github.com/<owner>/<repo>/releases/download/<tag>/<file>
 ;   4. Override the base URL at compile time if you fork/move:
 ;        iscc /dModelsBaseUrl="https://.../releases/download/models" stem_organizer.iss
-;   Recompute Hash/ExternalSize only if a weight file actually changes
-;   (python _onnx_spike/hash_weights.py --patch).
+;   The release may also host retired UMX-L/X-UMXL/SCNet/BS-RoFormer weights
+;   (``_``-prefixed) as backup — they are NOT used here; keep them on the release.
+;   Recompute Hash/ExternalSize only if a weight file actually changes.
 #ifndef ModelsBaseUrl
   #define ModelsRepo    "bascurtiz/STEM-organizer-models"
   #define ModelsReleaseTag "models"
@@ -75,27 +78,28 @@ Name: "custom"; Description: "Custom installation"; Flags: iscustom
 ; with no internet) can uncheck it to skip the download — the app will prompt
 ; for missing models per-feature at runtime. Default: checked (download).
 Name: "app"; Description: "{#MyAppName} (required)"; Types: full custom; Flags: fixed
-Name: "models"; Description: "Download AI models (~1.4 GB, required for stem separation & tagging)"; Types: full; Flags: checkablealone
+Name: "models"; Description: "Download models (~1.4 GB, required for stem separation & tagging)"; Types: full; Flags: checkablealone
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 ; Entire PyInstaller onedir (exe + _internal + taggers + demucs_onnx.py),
-; MINUS the 8 large .onnx weights — those are downloaded at install time from a
+; MINUS the large .onnx weights — those are downloaded at install time from a
 ; GitHub release (declarative `external download` entries below) and only when
 ; the user keeps the "models" component checked. Tiny sidecars (.json/.csv,
 ; ~30 KB) always ship bundled with the onedir.
-Source: "{#MyAppSource}\*"; Components: app; DestDir: "{app}"; Excludes: "\models\htdemucs.onnx,\panns_tagger\models\cnn14.onnx,\instrument_tagger\models\passt_openmic.onnx,\genre_gender_tagger\models\maest_discogs519.onnx,\genre_gender_tagger\models\discogs-effnet-bsdynamic-1.onnx,\genre_gender_tagger\models\gender-discogs-effnet-1.onnx,\genre_gender_tagger\models\vocal_reverb.onnx,\key_tagger\checkpoints\nf50-q05-221125.onnx"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppSource}\*"; Components: app; DestDir: "{app}"; Excludes: "\models\htdemucs.onnx,\models\htdemucs.batch.onnx,\models\vocal_classifier.onnx,\panns_tagger\models\cnn14.onnx,\instrument_tagger\models\passt_openmic.onnx,\genre_gender_tagger\models\maest_discogs519.onnx,\genre_gender_tagger\models\discogs-effnet-bsdynamic-1.onnx,\genre_gender_tagger\models\gender-discogs-effnet-1.onnx,\genre_gender_tagger\models\vocal_reverb.onnx,\key_tagger\checkpoints\nf50-q05-221125.onnx"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; --- Model weights: downloaded + SHA-256 verified at install time ---
 ; Only installed when the "models" component is selected (default: yes). A
 ; reinstalling user can uncheck it to skip the ~1.4 GB re-download. Inno shows a
 ; native progress bar and aborts that file on download failure or hash mismatch
 ; (tamper/corruption guard). ExternalSize is a byte hint; Hash is authoritative.
-; RELEASE WORKFLOW: tag `models`, upload the 8 files; recompute hashes only
-; if a weight file changes (see _onnx_spike/hash_weights.py).
-Source: "{#ModelsBaseUrl}/htdemucs.onnx"; Components: models; DestName: "htdemucs.onnx"; DestDir: "{app}\models"; ExternalSize: 316446953; Hash: "68d0bf16428ef66e692cdff8a9ccf28f1ef3f69440d57e58605a4cc55fcc5e74"; Flags: external download ignoreversion uninsneveruninstall
+; RELEASE WORKFLOW: tag `models`, upload the weight files; recompute hashes only
+; if a weight file changes.
+; HTDemucs: StemSplit dynbatch graph as release asset htdemucs.batch.onnx → DestName htdemucs.onnx.
+Source: "{#ModelsBaseUrl}/htdemucs.batch.onnx"; Components: models; DestName: "htdemucs.onnx"; DestDir: "{app}\models"; ExternalSize: 316446949; Hash: "8e9cfef49390c85093e6d557cf568748c35e04940c9b104564c4b723f5df072b"; Flags: external download ignoreversion uninsneveruninstall
 Source: "{#ModelsBaseUrl}/cnn14.onnx"; Components: models; DestName: "cnn14.onnx"; DestDir: "{app}\panns_tagger\models"; ExternalSize: 327331890; Hash: "80310d45194dc603143e9b59631920254f6544917fce3d96170c4a5ea120bec1"; Flags: external download ignoreversion uninsneveruninstall
 Source: "{#ModelsBaseUrl}/passt_openmic.onnx"; Components: models; DestName: "passt_openmic.onnx"; DestDir: "{app}\instrument_tagger\models"; ExternalSize: 341564125; Hash: "16e85ea2fac40b9f3c211b96ccb393111ea281f8a9e0f1a40322f2f726303b7a"; Flags: external download ignoreversion uninsneveruninstall
 Source: "{#ModelsBaseUrl}/maest_discogs519.onnx"; Components: models; DestName: "maest_discogs519.onnx"; DestDir: "{app}\genre_gender_tagger\models"; ExternalSize: 348091011; Hash: "013e41a6b981be30c3a646c3581cac7b8dfcd35f2b3db01769b0681d3ffa0c8f"; Flags: external download ignoreversion uninsneveruninstall
@@ -103,6 +107,8 @@ Source: "{#ModelsBaseUrl}/discogs-effnet-bsdynamic-1.onnx"; Components: models; 
 Source: "{#ModelsBaseUrl}/gender-discogs-effnet-1.onnx"; Components: models; DestName: "gender-discogs-effnet-1.onnx"; DestDir: "{app}\genre_gender_tagger\models"; ExternalSize: 514089; Hash: "e3e865d4bf36d4817f32ddab9452b2729f9e33a4d068d1c44ea44972a7999e91"; Flags: external download ignoreversion uninsneveruninstall
 Source: "{#ModelsBaseUrl}/vocal_reverb.onnx"; Components: models; DestName: "vocal_reverb.onnx"; DestDir: "{app}\genre_gender_tagger\models"; ExternalSize: 376812; Hash: "88fe45d4d16b3bbd8ff031095cc9a202f6ad0e71bf201147af6d4b07fd16cf08"; Flags: external download ignoreversion uninsneveruninstall
 Source: "{#ModelsBaseUrl}/nf50-q05-221125.onnx"; Components: models; DestName: "nf50-q05-221125.onnx"; DestDir: "{app}\key_tagger\checkpoints"; ExternalSize: 11483608; Hash: "9387f472000fc4cf7076668360fd35e918a3d32443db13144ac741fbfe604f6a"; Flags: external download ignoreversion uninsneveruninstall
+; Vocal CNN6 classifier ONNX (trained on user data, ~24 MB) — Classify vocal type.
+Source: "{#ModelsBaseUrl}/vocal_classifier.onnx"; Components: models; DestName: "vocal_classifier.onnx"; DestDir: "{app}\models"; ExternalSize: 24137640; Hash: "fb4233dc05fc3c44edef05490eb73e271e4d80fbf98a5f6a20a47d80ad1a1fbe"; Flags: external download ignoreversion uninsneveruninstall
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -112,72 +118,40 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
 [Code]
-// --- Uninstall: ask whether to keep or remove the downloaded AI models ---
-// The 8 .onnx weights (~1.4 GB) were downloaded at install time. By default
-// Inno's uninstall log would remove them silently. To let a reinstalling user
-// KEEP them (so they don't re-download), we suppress auto-removal via the
-// `nouninstallfiles`-equivalent (these are external-download files, tracked in
-// the uninstall log) and ask once during uninstall.
-//
-// NOTE on `external download` tracking: Inno records successfully-installed
-// external files in the uninstall log, so they ARE removed by default. To make
-// the keep-choice meaningful we delete them ONLY if the user says yes here, and
-// mark the weight [Files] entries so they're not auto-uninstalled. Because we
-// can't conditionally un-track them at install time, we instead re-add them to
-// the deletion set here only when the user confirms.
-
-const
-  // Dist-relative paths of the 8 downloaded weights (must match [Files] above).
-  UNINSTALL_WEIGHTS =
-    '\models\htdemucs.onnx|\panns_tagger\models\cnn14.onnx|\instrument_tagger\models\passt_openmic.onnx|\genre_gender_tagger\models\maest_discogs519.onnx|\genre_gender_tagger\models\discogs-effnet-bsdynamic-1.onnx|\genre_gender_tagger\models\gender-discogs-effnet-1.onnx|\genre_gender_tagger\models\vocal_reverb.onnx|\key_tagger\checkpoints\nf50-q05-221125.onnx';
-
-function SplitAndDeleteWeights(const AppDir, PipeList: String): Integer;
-// Splits PipeList on '|', deletes each existing file under AppDir. Returns count.
-var
-  S, P: String;
-  Count: Integer;
-begin
-  Count := 0;
-  S := PipeList;
-  while (S <> '') do begin
-    if Pos('|', S) > 0 then begin
-      P := Copy(S, 1, Pos('|', S) - 1);
-      Delete(S, 1, Pos('|', S));
-    end else begin
-      P := S;
-      S := '';
-    end;
-    if (P <> '') and FileExists(AppDir + P) then begin
-      if DeleteFile(AppDir + P) then
-        Count := Count + 1;
-    end;
-  end;
-  Result := Count;
-end;
+// --- Uninstall: ask whether to wipe leftover {app} data ---
+// Large .onnx weights use `uninsneveruninstall`, so Inno leaves them (and any
+// other leftovers: settings, caches, flac/mp3val tools, empty model dirs, CSVs)
+// under {app} after the normal uninstall. At usPostUninstall we ask once:
+//   Yes → DelTree the entire install folder (models + settings + tools + caches).
+//   No  → leave leftovers for a faster reinstall (weights stay; settings too).
+// Prompt whenever {app} still exists — not only when a sentinel weight is present.
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   AppDir: String;
   MsgRes: Integer;
-  Removed: Integer;
 begin
   if CurUninstallStep <> usPostUninstall then
     Exit;
   AppDir := ExpandConstant('{app}');
-  // Only ask if at least one weight is actually present.
-  // (Cheap presence check via the Demucs weight — the largest, always expected.)
-  if not FileExists(AppDir + '\models\htdemucs.onnx') then
+  // After Inno removes tracked files, {app} may still hold uninsneveruninstall
+  // weights and/or leftover settings/caches/tools. Ask whenever the folder remains.
+  if not DirExists(AppDir) then
     Exit;
   MsgRes := SuppressibleMsgBox(
-    'Remove the downloaded AI models (~1.4 GB)?' + #13#10#13#10 +
-    'Choose Yes to free the disk space.' + #13#10 +
-    'Choose No to keep them for a faster reinstall.',
+    'Remove the entire STEM organizer install folder?' + #13#10#13#10 +
+    'Yes deletes everything left under the install directory — downloaded models ' +
+    '(~1.4 GB), settings, caches, tools (flac/mp3val), and other leftovers.' + #13#10#13#10 +
+    'No keeps models and settings for a faster reinstall.',
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO);
   if MsgRes = IDYES then begin
-    Removed := SplitAndDeleteWeights(AppDir, UNINSTALL_WEIGHTS);
-    Log('Uninstall: removed ' + IntToStr(Removed) + ' model weight file(s).');
+    // usPostUninstall: Inno has finished removing tracked files; wipe the rest.
+    if DelTree(AppDir, True, True, True) then
+      Log('Uninstall: wiped install folder ' + AppDir)
+    else
+      Log('Uninstall: DelTree failed for ' + AppDir);
   end else begin
-    Log('Uninstall: user chose to keep model weights.');
+    Log('Uninstall: user chose to keep install-folder leftovers.');
   end;
 end;
 

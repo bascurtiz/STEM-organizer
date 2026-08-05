@@ -21,14 +21,24 @@ def find_on_path(name: str, override: str = "") -> Optional[str]:
     return shutil.which(f"{name}.exe")
 
 
-def find_ffmpeg() -> Optional[str]:
-    try:
-        from ffmpeg_bootstrap import ffmpeg_path
+def find_ffmpeg(*, ensure: bool = True) -> Optional[str]:
+    """Locate ffmpeg: bundled ``ffmpeg/`` → PATH → optional download.
 
-        p = ffmpeg_path()
+    ``ensure=True`` downloads a real build once when nothing usable is found
+    (mirrors ``find_mp3val`` / ``find_flac``). Never matches the crippled
+    Microsoft Store ffmpeg alias in WindowsApps.
+    """
+    try:
+        from ffmpeg_bootstrap import ensure_ffmpeg, ffmpeg_path
+
+        p = ensure_ffmpeg() if ensure else ffmpeg_path()
         return str(p) if p else None
     except Exception:
-        return find_on_path("ffmpeg")
+        # Last resort — never accept the crippled Microsoft Store stub.
+        found = find_on_path("ffmpeg")
+        if found and "WindowsApps" not in found:
+            return found
+        return None
 
 
 def find_ffprobe() -> Optional[str]:

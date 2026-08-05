@@ -554,7 +554,7 @@ NUMBER_OF_CLIPS = 3
 
 # Defaults tuned for large libraries on a single HDD/NAS (RTX-class GPU).
 # Workers/chunk come from Quick tune; GPU batch aligned with Gender/Reverb (64).
-BATCH_SIZE = 64
+BATCH_SIZE = 4  # MAEST files/batch (×3 clips); 64 OOMs Softmax ~26 GB on CUDA
 
 
 # CPU workers — parallel decode + feature extract (batch mode only).
@@ -713,16 +713,38 @@ _MEL_FILTERBANK = None
 # DEVICE / DTYPE
 # ==========================================================
 #
-# Works with or without an NVIDIA GPU. On a CPU-only machine
-# (e.g. a VM) we fall back to fp32 and skip autocast, since the
-# fp16/autocast path below is CUDA-only and would error on CPU.
+# Torch CUDA is optional (frozen ONNX builds ship without torch).
+# ONNX Runtime can still use CUDAExecutionProvider on NVIDIA — Genre/Gender
+# must not treat "no torch" as "CPU only".
 
 _status("Detecting compute device...")
 
+
+def _probe_ort_cuda() -> tuple[bool, str]:
+    """Return (ok, detail) for ORT CUDA EP + real NVIDIA GPU."""
+    if os.environ.get("STEM_ORT_CUDA", "1").strip() == "0":
+        return False, "STEM_ORT_CUDA=0"
+    try:
+        import onnxruntime as ort
+        from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            return False, "CUDA EP not in this onnxruntime build"
+        if not nvidia_gpu_present():
+            return False, "no NVIDIA GPU detected"
+        if not cuda_ep_usable():
+            return False, "CUDA EP not usable"
+        return True, "CUDAExecutionProvider"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+ORT_CUDA_OK, ORT_CUDA_DETAIL = _probe_ort_cuda()
+
 if torch is not None:
     IS_GPU = torch.cuda.is_available()
-    device = "cuda" if IS_GPU else "cpu"
-    # fp16 on GPU (proven, same as v0.4), fp32 on CPU.
+    device = "cuda" if IS_GPU else ("cuda" if ORT_CUDA_OK else "cpu")
+    # fp16/autocast only when torch CUDA exists; ORT-CUDA uses fp32 tensors.
     MODEL_DTYPE = torch.float16 if IS_GPU else torch.float32
     torch.set_grad_enabled(False)
     if IS_GPU:
@@ -730,14 +752,20 @@ if torch is not None:
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         gpu_name = torch.cuda.get_device_name(0)
-        _status(f"Device: CUDA — {gpu_name}")
+        _status(f"Device: CUDA (torch) — {gpu_name}")
+    elif ORT_CUDA_OK:
+        _status(f"Device: ONNX Runtime CUDA EP — {ORT_CUDA_DETAIL}")
     else:
-        _status("Device: CPU (no NVIDIA GPU detected)")
+        _status(f"Device: CPU (no torch CUDA; ORT: {ORT_CUDA_DETAIL})")
 else:
     IS_GPU = False
-    device = "cpu"
     MODEL_DTYPE = None
-    _status("Device: CPU (ONNX / no torch)")
+    if ORT_CUDA_OK:
+        device = "cuda"  # GPU via ORT — not torch
+        _status(f"Device: ONNX Runtime CUDA EP — {ORT_CUDA_DETAIL}")
+    else:
+        device = "cpu"
+        _status(f"Device: CPU (ONNX) — {ORT_CUDA_DETAIL}")
 
 _status("Startup complete.\n")
 
@@ -792,6 +820,38 @@ if _GG_MODE:
         GENDER_FILE_CHUNK = max(128, int(_gg_file_chunk))
         REVERB_FILE_CHUNK = GENDER_FILE_CHUNK
         REVERB_GPU_BATCH = GENDER_BATCH_SIZE
+
+    # Safety nets after UI Quick-tune env:
+    # - CPU: avoid ORT×ThreadPool desktop freeze
+    # - Genre MAEST (GPU or CPU): never batch 64 files (×3 clips → ~26 GB Softmax OOM)
+    def _ort_cuda_ready() -> bool:
+        if os.environ.get("STEM_ORT_CUDA", "1").strip() == "0":
+            return False
+        try:
+            from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+            return bool(cuda_ep_usable() and nvidia_gpu_present())
+        except Exception:
+            return False
+
+    _cuda_ok = _ort_cuda_ready()
+    if _GG_MODE == "genre":
+        # Caps even when GG_BATCH_SIZE=64 is injected from an old hint/cache.
+        BATCH_SIZE = min(BATCH_SIZE, 4)
+        GENRE_FILE_CHUNK = min(GENRE_FILE_CHUNK, max(BATCH_SIZE, 32))
+        AUDIO_WORKERS = min(AUDIO_WORKERS, 4 if _cuda_ok else 2)
+    if not _cuda_ok:
+        AUDIO_WORKERS = min(AUDIO_WORKERS, 2)
+        if _GG_MODE == "genre":
+            BATCH_SIZE = min(BATCH_SIZE, 4)
+            GENRE_FILE_CHUNK = min(GENRE_FILE_CHUNK, max(BATCH_SIZE, 32))
+        GENDER_FILE_CHUNK = min(GENDER_FILE_CHUNK, 64)
+        REVERB_FILE_CHUNK = GENDER_FILE_CHUNK
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+        os.environ.setdefault("STEM_ORT_INTRA_OP", "2")
 
     _input_path = Path(INPUT_FOLDER) if INPUT_FOLDER else None
     if not _input_path or not _input_path.is_dir():
@@ -1342,24 +1402,25 @@ class _GenderOrtBackend:
 
 
 def _ort_providers():
+    """Prefer CUDA EP when available — do not require torch.cuda (frozen ONNX)."""
+    try:
+        from ort_util import ort_providers as _shared
+
+        return _shared("")
+    except Exception:
+        pass
     import onnxruntime as ort
 
     available = set(ort.get_available_providers())
-    # CPU-only / no NVIDIA: never list DirectML. The directml wheel still
-    # reports DmlExecutionProvider as available, but probing it dumps a raw
-    # "EP Error: ... No devices detected" to stderr before falling back to CPU.
-    if not IS_GPU:
-        return ["CPUExecutionProvider"]
+    if "CUDAExecutionProvider" in available:
+        try:
+            from ort_util import nvidia_gpu_present
 
-    ordered = []
-    for name in (
-        "CUDAExecutionProvider",
-        "DmlExecutionProvider",
-        "CPUExecutionProvider",
-    ):
-        if name in available:
-            ordered.append(name)
-    return ordered or ["CPUExecutionProvider"]
+            if nvidia_gpu_present():
+                return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        except Exception:
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
 
 
 def _quiet_ort_session(model_path, sess_options, providers):
@@ -1395,14 +1456,21 @@ def load_gender_ort_backend(model_dir=None, status=print):
     import onnxruntime as ort
 
     effnet_path, head_path = ensure_gender_onnx_models(model_dir, status=status)
-    available = set(ort.get_available_providers())
     providers = _ort_providers()
-    if not IS_GPU and "DmlExecutionProvider" in available:
-        status("  DirectML unavailable - using CPU")
-    else:
-        status(f"  ONNX Runtime providers: {', '.join(providers)}")
+    status(f"  ONNX Runtime providers: {', '.join(providers)}")
     so = ort.SessionOptions()
     so.log_severity_level = 3
+    try:
+        so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        so.inter_op_num_threads = 1
+        if providers[0] == "CPUExecutionProvider":
+            cpu_n = max(1, os.cpu_count() or 4)
+            env_intra = os.environ.get("STEM_ORT_INTRA_OP", "").strip()
+            so.intra_op_num_threads = (
+                max(1, int(env_intra)) if env_intra else max(1, cpu_n // 2)
+            )
+    except Exception:
+        pass
     # Quiet create when a GPU EP is first — ORT may still probe-and-fallback.
     if providers[0] != "CPUExecutionProvider":
         effnet = _quiet_ort_session(effnet_path, so, providers)
@@ -1419,7 +1487,7 @@ def load_gender_ort_backend(model_dir=None, status=print):
         providers[0] != "CPUExecutionProvider"
         and active == "CPUExecutionProvider"
     ):
-        status("  DirectML unavailable - using CPU")
+        status(f"  GPU EP unavailable — fell back to CPU ({ORT_CUDA_DETAIL})")
     else:
         status(f"  using {active} for discogs-effnet + gender head")
     return _GenderOrtBackend(effnet, head, active)
@@ -2498,12 +2566,18 @@ if CONTENT_TYPE == "acapella":
 # ==========================================================
 
 # Prefer ONNX (STEM_ONNX default) — skip transformers import when assets exist.
+# Prefer ORT CUDA when available — frozen builds have no torch.cuda.
+_maest_ort_device = (
+    "cpu" if os.environ.get("STEM_ORT_CUDA", "1").strip() == "0" else ""
+)
+if not ORT_CUDA_OK:
+    _maest_ort_device = "cpu"
 _maest_onnx_early = None
 try:
     from maest_onnx import try_load_maest_onnx as _try_maest
 
     _maest_onnx_early = _try_maest(
-        device="" if device == "cuda" else "cpu",
+        device=_maest_ort_device,
         status=lambda m: None,
     )
 except Exception:
@@ -2551,23 +2625,27 @@ _log_intro(
     f"{getattr(torchaudio, '__version__', None) or 'not installed (librosa resample)'}"
 )
 
-_log_intro(
-    f"CUDA: {torch.version.cuda if torch is not None else 'n/a'}"
-)
+if torch is not None and getattr(torch.version, "cuda", None):
+    _log_intro(
+        f"CUDA (torch): {torch.version.cuda} "
+        f"(available={torch.cuda.is_available()})"
+    )
+elif ORT_CUDA_OK:
+    _log_intro(f"CUDA (ONNX Runtime): {ORT_CUDA_DETAIL}")
+else:
+    _log_intro(f"CUDA: not available ({ORT_CUDA_DETAIL})")
 
-_log_intro(f"Device: {device}")
-
-
-
-if device == "cuda":
-
+if device == "cuda" and IS_GPU:
+    _log_intro(f"Device: cuda (torch)")
     _log_intro(f"GPU: {torch.cuda.get_device_name(0)}")
-
     _log_intro(
         "VRAM: "
         f"{round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 2)} GB"
     )
-
+elif device == "cuda" and ORT_CUDA_OK:
+    _log_intro("Device: cuda (ONNX Runtime CUDA EP)")
+else:
+    _log_intro(f"Device: {device}")
 
 print()
 
@@ -2612,7 +2690,7 @@ if _maest_onnx is None:
         from maest_onnx import try_load_maest_onnx
 
         _maest_onnx = try_load_maest_onnx(
-            device="" if device == "cuda" else "cpu",
+            device=_maest_ort_device,
             status=lambda m: _log_intro(m),
         )
     except Exception as _maest_exc:
@@ -2829,28 +2907,14 @@ def run_gpu_batch(batch):
     asynchronously and runs the model.
     """
 
-    input_values_list = []
-
-    mapping = []
-
-
-    for index, inputs in batch:
-
-        iv = inputs["input_values"]
-
-        input_values_list.append(
-            iv
-        )
-
-        n_clips = iv.shape[0]
-
-        mapping.extend(
-            [index] * n_clips
-        )
-
-
-    # ONNX path: numpy concat + softmax (no torch).
-    if USE_MAEST_ONNX:
+    def _maest_onnx_forward(sub_batch):
+        input_values_list = []
+        mapping = []
+        for index, inputs in sub_batch:
+            iv = inputs["input_values"]
+            input_values_list.append(iv)
+            n_clips = iv.shape[0]
+            mapping.extend([index] * n_clips)
         all_iv = np.concatenate(
             [np.asarray(iv, dtype=np.float32) for iv in input_values_list],
             axis=0,
@@ -2862,14 +2926,43 @@ def run_gpu_batch(batch):
         probs = _softmax_np(logits)
         return probs, mapping
 
+    def _is_ort_oom(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return (
+            "allocate memory" in msg
+            or "out of memory" in msg
+            or "oom" in msg
+            or "bfcarena" in msg
+            or "failed to allocate" in msg
+        )
+
+    # ONNX path: numpy concat + softmax (no torch). Split on VRAM OOM.
+    if USE_MAEST_ONNX:
+        try:
+            return _maest_onnx_forward(batch)
+        except Exception as exc:
+            if len(batch) <= 1 or not _is_ort_oom(exc):
+                raise
+            mid = max(1, len(batch) // 2)
+            print(
+                f"  MAEST ORT OOM at batch={len(batch)} clips-files — "
+                f"retrying as {mid}+{len(batch) - mid}",
+                flush=True,
+            )
+            p0, m0 = run_gpu_batch(batch[:mid])
+            p1, m1 = run_gpu_batch(batch[mid:])
+            return np.concatenate([p0, p1], axis=0), m0 + m1
+
+    input_values_list = []
+    mapping = []
+    for index, inputs in batch:
+        iv = inputs["input_values"]
+        input_values_list.append(iv)
+        n_clips = iv.shape[0]
+        mapping.extend([index] * n_clips)
+
     # All clips are equal length -> plain cat, no padding needed.
-
-    all_iv = torch.cat(
-        input_values_list,
-        dim=0
-    )
-
-
+    all_iv = torch.cat(input_values_list, dim=0)
 
     # Pinned memory + non_blocking transfer (GPU only).
     # Requires a pinned source to actually run async.

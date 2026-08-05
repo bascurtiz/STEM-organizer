@@ -81,16 +81,17 @@ _SAMPLE_FMT_TO_SUBTYPE = {
 
 
 def _ffmpeg_tools() -> tuple[str, str]:
-    """Return (ffmpeg, ffprobe) from install-deps / PATH. Raises if missing."""
-    from ffmpeg_bootstrap import ffmpeg_path
+    """Return (ffmpeg, ffprobe), downloading a real build once when missing."""
+    from ffmpeg_bootstrap import ensure_ffmpeg
 
     from ..corruption.tools import find_ffprobe
 
-    ffmpeg = ffmpeg_path()
+    ffmpeg = ensure_ffmpeg()
     ffprobe = find_ffprobe()
     if not ffmpeg:
         raise RuntimeError(
-            "ffmpeg not found. Re-run install-deps.bat (or put ffmpeg on PATH)."
+            "ffmpeg not found and automatic download failed. "
+            "Re-run install-deps.bat (or put ffmpeg on PATH)."
         )
     if not ffprobe:
         raise RuntimeError(

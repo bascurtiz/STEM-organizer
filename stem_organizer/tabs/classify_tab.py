@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker, Signal
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QGridLayout,
@@ -41,7 +41,11 @@ from ..widgets.path_row import PathRow
 from ..widgets.section import Section
 from ..widgets.slider_field import SliderField
 from ..workers.base import BaseWorker
-from ..workers.classify_worker import ClassifyWorker, SdrClassifyWorker
+from ..workers.classify_worker import (
+    ClassifyWorker,
+    SdrClassifyWorker,
+    SdrPreflightWorker,
+)
 
 
 # Action-bar / mode tips (field tips are set inline beside each control).
@@ -78,11 +82,12 @@ class ClassifyTab(QWidget):
     def __init__(self, settings: SettingsStore) -> None:
         super().__init__()
         self._settings = settings
-        self._worker: Optional[BaseWorker] = None
-        self._worker_kind: Optional[str] = None  # "rms" | "sdr"
+        self._worker: Optional[object] = None  # BaseWorker | SdrPreflightWorker
+        self._worker_kind: Optional[str] = None  # "rms" | "sdr" | "sdr_preflight"
         self._rms_saw_done = False
         self._is_sdr_mode = False
         self._loading = False
+        self._pending_sdr_params: Optional[dict] = None
         self._sdr_threshold_widgets: dict[str, SliderField] = {}
         self._sdr_thresholds: dict[str, int] = dict(cb.SDR_DEFAULT_THRESHOLDS)
 
@@ -227,17 +232,14 @@ class ClassifyTab(QWidget):
         self.model_combo = ComboBox()
         for k in cb.MODELS:
             self.model_combo.addItem(k)
-        self.model_combo.setToolTip(
-            theme.format_tooltip(
-                "htdemucs — 4-stem Demucs via ONNX Runtime (CUDA EP / CPU). "
-                "StemSplit MIT weights."
-            )
-        )
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.model_combo.setToolTip(self._model_tooltip(self.model_combo.currentText()))
         self.stem_combo = ComboBox()
         for k in cb.STEM_MODES:
             self.stem_combo.addItem(k)
         self.stem_combo.setToolTip(
-            "2: vocals + instrumental.\n4: bass / drums / other / vocals."
+            "2: vocals + instrumental.\n"
+            "4: bass / drums / other / vocals."
         )
         self.stem_combo.currentTextChanged.connect(lambda _t: self._rebuild_sdr_thresholds())
         self.quality_combo = ComboBox()
@@ -264,6 +266,8 @@ class ClassifyTab(QWidget):
         _stem_fm = QFontMetrics(theme.F_BODY)
         _stem_w = max(_stem_fm.horizontalAdvance(t) for t in cb.STEM_MODES) + _stem_pad
         self.stem_combo.setFixedWidth(_stem_w)
+        # Filter stem choices to the default model's allowed set (htdemucs → 2/4).
+        self._refresh_stem_combo_for_model(self.model_combo.currentText())
         self._place_combo(opts_grid, 1, 0, "Quality", self.quality_combo)
         opts_grid.addWidget(self.use_cuda, 1, 2, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
         self._place_combo(opts_grid, 2, 0, "Ambiguous", self.ambig_combo)
@@ -491,89 +495,58 @@ class ClassifyTab(QWidget):
         grid.addWidget(combo, row, col + 1)
 
     def _configure_cuda_checkbox(self) -> None:
-        """Enable GPU checkbox — CUDA EP on ONNX path, CUDA on torch fallback."""
-        onnx = False
+        """Enable GPU checkbox — CUDA preferred, then DirectML, else CPU."""
+        has_dml = False
+        has_cuda = False
         try:
-            from demucs_onnx import resolve_htdemucs_onnx, stem_onnx_enabled
+            import onnxruntime as ort
 
-            onnx = stem_onnx_enabled() and resolve_htdemucs_onnx() is not None
+            available = set(ort.get_available_providers())
+            has_dml = "DmlExecutionProvider" in available
         except Exception:
-            onnx = False
-
-        if onnx:
-            try:
-                from ort_util import cuda_ep_usable
-
-                has_cuda = bool(cuda_ep_usable())
-            except Exception:
-                has_cuda = False
-            self._cuda_enabled = has_cuda
-            if has_cuda:
-                self.use_cuda.setText("Use GPU (CUDA)")
-                self.use_cuda.setChecked(True)
-                self.use_cuda.setEnabled(True)
-                self.use_cuda.setToolTip(
-                    theme.format_tooltip(
-                        "Demucs via ONNX Runtime CUDAExecutionProvider.\n"
-                        "StemSplit htdemucs.onnx — ~8 GB VRAM on RTX 5090 (measured).\n"
-                        "DirectML is not used for Demucs (~31 GB VRAM blow-up).\n"
-                        "Falls back to CPU if CUDA/cuDNN is unavailable."
-                    )
-                )
-            else:
-                self.use_cuda.setText("Use GPU (CUDA)   ·   no NVIDIA GPU")
-                self.use_cuda.setChecked(False)
-                self.use_cuda.setEnabled(False)
-                self.use_cuda.setToolTip(
-                    theme.format_tooltip(
-                        "No usable NVIDIA GPU detected.\n"
-                        "The onnxruntime-gpu wheel still lists CUDAExecutionProvider\n"
-                        "on GPU-less VMs, but inference would run on CPU.\n"
-                        "Processing will use CPU."
-                    )
-                )
-            return
-
+            available = set()
         try:
-            enabled = bool(cb.cuda_effective())
-        except Exception:
-            enabled = False
-        self._cuda_enabled = enabled
+            from ort_util import cuda_ep_usable
 
-        if enabled:
-            self.use_cuda.setText("Use CUDA (GPU)")
+            has_cuda = bool(cuda_ep_usable())
+        except Exception:
+            has_cuda = False
+
+        self._cuda_enabled = bool(has_cuda or has_dml)
+        if has_cuda:
+            self.use_cuda.setText("Use GPU (CUDA)")
             self.use_cuda.setChecked(True)
             self.use_cuda.setEnabled(True)
             self.use_cuda.setToolTip(
                 theme.format_tooltip(
-                    "Use NVIDIA GPU for separation. Falls back to CPU if unavailable."
+                    "Classify separators + taggers via ONNX Runtime CUDA EP.\n"
+                    "Requires a real NVIDIA GPU + cuDNN (bundled).\n"
+                    "HTDemucs uses CUDA or CPU (DirectML not used).\n"
+                    "Falls back to CPU if CUDA/cuDNN is unavailable."
+                )
+            )
+            return
+        if has_dml:
+            self.use_cuda.setText("Use GPU (DirectML)")
+            self.use_cuda.setChecked(True)
+            self.use_cuda.setEnabled(True)
+            self.use_cuda.setToolTip(
+                theme.format_tooltip(
+                    "ONNX Runtime DirectML (vendor-neutral GPU).\n"
+                    "HTDemucs uses CUDA or CPU (DirectML historically rejected)."
                 )
             )
             return
 
-        # CTk label variants when CUDA cannot be used
-        try:
-            torch_mod = getattr(cb, "torch", None)
-            if torch_mod is not None and torch_mod.cuda.is_available():
-                text = "Use CUDA (GPU)   ·   incompatible PyTorch build"
-                tip = (
-                    cb.cuda_incompatibility_hint()
-                    or "GPU detected but this PyTorch build cannot run on it. Using CPU."
-                )
-            elif cb.torch_cuda_built():
-                text = "Use CUDA (GPU)   ·   no GPU detected"
-                tip = "PyTorch has CUDA support, but no usable NVIDIA GPU was detected."
-            else:
-                text = "Use CUDA (GPU)   ·   unavailable"
-                tip = "CUDA is not available. Processing will use CPU."
-        except Exception:
-            text = "Use CUDA (GPU)   ·   unavailable"
-            tip = "CUDA is not available. Processing will use CPU."
-
-        self.use_cuda.setText(text)
+        self.use_cuda.setText("Use GPU   ·   unavailable")
         self.use_cuda.setChecked(False)
         self.use_cuda.setEnabled(False)
-        self.use_cuda.setToolTip(theme.format_tooltip(tip))
+        self.use_cuda.setToolTip(
+            theme.format_tooltip(
+                "No CUDA or DirectML EP available in this ONNX Runtime build.\n"
+                "Processing will use CPU."
+            )
+        )
 
     def _on_cls_seg_changed(self, key: str) -> None:
         idx = 1 if key == "sdr" else 0
@@ -582,8 +555,64 @@ class ClassifyTab(QWidget):
         self._on_subtab_changed(idx)
         self._schedule_save()
 
+    def _allowed_stem_modes(self, model_label: str) -> list[str]:
+        """Stem-mode labels selectable for a given model.
+
+        HTDemucs produces 4 stems → 2/4 only (no guitar/piano).
+        Vocal CNN6 classifies vocal/instrumental → 2-stem only.
+        """
+        all_modes = list(cb.STEM_MODES.keys())
+        model_id = cb.MODELS.get(model_label, '')
+        if model_id == 'vocal_cnn6':
+            return [m for m in all_modes if m.startswith('2 ')]
+        return [m for m in all_modes if not m.startswith('6 ')]
+
+    def _model_tooltip(self, model_label: str) -> str:
+        model_id = cb.MODELS.get(model_label, '')
+        if model_id == 'vocal_cnn6':
+            return theme.format_tooltip(
+                "Vocal CNN6 — lightweight binary classifier (4.9M params). "
+                "Classifies stems as vocal or instrumental in one fast forward pass "
+                "(~10 ms per clip on GPU), no stem separation needed. "
+                "2-stem mode only. For SI-SDR quality scoring, switch to HTDemucs "
+                "or another separator after RMS classification completes."
+            )
+        return theme.format_tooltip(
+            "htdemucs — Hybrid Transformer Demucs (StemSplit ONNX). "
+            "~7.8 s chunks, CUDA EP (DirectML not used — VRAM/accuracy). "
+            "4 stems: drums/bass/other/vocals."
+        )
+
+    def _refresh_stem_combo_for_model(self, model_label: str) -> None:
+        """Restrict the Stems dropdown to the model's allowed modes.
+
+        If the current selection is no longer allowed (e.g. 6-stem under
+        htdemucs), fall back to the closest valid mode (6 → 4).
+        """
+        allowed = self._allowed_stem_modes(model_label)
+        current = self.stem_combo.currentText()
+        with QSignalBlocker(self.stem_combo):
+            self.stem_combo.clear()
+            for m in allowed:
+                self.stem_combo.addItem(m)
+        if current in allowed:
+            self.stem_combo.setCurrentText(current)
+        elif current.startswith('6 ') and any(m.startswith('4 ') for m in allowed):
+            self.stem_combo.setCurrentText(next(m for m in allowed if m.startswith('4 ')))
+        elif allowed:
+            self.stem_combo.setCurrentText(allowed[0])
+        self._rebuild_sdr_thresholds()
+
+    def _on_model_changed(self, *_args) -> None:
+        """React to Model dropdown: update tooltip + filter Stems choices."""
+        label = self.model_combo.currentText()
+        self.model_combo.setToolTip(self._model_tooltip(label))
+        self._refresh_stem_combo_for_model(label)
+
     def _rebuild_sdr_thresholds(self) -> None:
         """Rebuild SI-SDR sliders for the categories of the selected Stems mode."""
+        if getattr(self, 'cls_notebook', None) is None:
+            return  # not constructed yet (early model-change during _setup_ui)
         sdr_tab = self.cls_notebook.widget(1)
         if sdr_tab is None:
             return
@@ -682,6 +711,9 @@ class ClassifyTab(QWidget):
         win = self.window()
         if win is not None and hasattr(win, "set_log_export_prefix"):
             win.set_log_export_prefix("classify")
+        # Immediate feedback before the worker thread spins up (CUDA probe /
+        # model load can take seconds before the first backend log line).
+        self.request_log.emit("  Starting…", "")
         self._worker = ClassifyWorker(params, parent=self)
         self._wire_worker(self._worker)
         self.set_running(True)
@@ -691,6 +723,14 @@ class ClassifyTab(QWidget):
         target_dir = self.output_row.text().strip()
         if not target_dir:
             self.request_log.emit("[error] Select an output folder first.", "err")
+            return
+        model_id = cb.MODELS.get(self.model_combo.currentText(), '')
+        if model_id == 'vocal_cnn6':
+            self.request_log.emit(
+                "[error] Vocal CNN6 is a classifier, not a separator. "
+                "Switch Model to HTDemucs for SI-SDR.",
+                "err",
+            )
             return
         params = {
             "target_dir": target_dir,
@@ -702,35 +742,56 @@ class ClassifyTab(QWidget):
             "sdr_delete_folder": self.sdr_delete_folder.isChecked(),
             "write_sdr_tags": self.sdr_write_tags.isChecked(),
         }
-        if not self._maybe_prompt_sdr_process_all(params):
-            return
-        self._worker_kind = "sdr"
+        # Heavy tree walks used to run on the GUI thread here and froze Start
+        # (Windows busy cursor + Not Responding title-bar line). Scan off-thread
+        # first; dialogs stay on the main thread after the scan returns.
+        self._pending_sdr_params = params
+        self._worker_kind = "sdr_preflight"
         win = self.window()
         if win is not None and hasattr(win, "set_log_export_prefix"):
             win.set_log_export_prefix("sdr")
+        self.request_log.emit("  Scanning for SI-SDR…", "")
+        preflight = SdrPreflightWorker(params, parent=self)
+        preflight.log_line.connect(self._forward_worker_log)
+        preflight.finished_result.connect(self._on_sdr_preflight_done)
+        self._worker = preflight
+        self.set_running(True)
+        preflight.start()
+
+    def _on_sdr_preflight_done(self, result: object) -> None:
+        """Apply process-all dialogs (fast) then launch the real SI-SDR worker."""
+        if self._worker_kind != "sdr_preflight":
+            return
+        self._worker = None
+        self._worker_kind = None
+        params = self._pending_sdr_params
+        self._pending_sdr_params = None
+        if params is None or result is None:
+            self.set_running(False)
+            if result is None:
+                self.request_log.emit("  [stopping] SI-SDR scan cancelled.", "warn")
+            return
+        if not isinstance(result, dict):
+            self.set_running(False)
+            self.request_log.emit("[error] SI-SDR scan returned unexpected data.", "err")
+            return
+        self._apply_sdr_process_all_prompts(params, result)
+        self._worker_kind = "sdr"
+        self.request_log.emit("  Starting…", "")
         self._worker = SdrClassifyWorker(params, parent=self)
         self._wire_worker(self._worker)
-        self.set_running(True)
+        # Already in running UI state from preflight.
         self._worker.start()
 
-    def _maybe_prompt_sdr_process_all(self, params: dict) -> bool:
-        """Ask to treat loose files / 2-file folders as one stem type or pairs.
-
-        Pair ask (MUSDB): ≥10 two-file song folders without clear names → process all as pairs.
-        Flat ask: ≥10 instrumental or vocals keyword hits with leftovers → process all as that type.
-        """
-        root = Path(params["target_dir"])
-        if not root.is_dir():
-            return True
-        scan_mode = params["scan_mode"]
+    def _apply_sdr_process_all_prompts(self, params: dict, preflight: dict) -> None:
+        """Ask process-all questions using scan results gathered off-thread."""
         mode_cfg = cb.STEM_MODES[cb.resolve_stem_mode(params["stem_mode"])]
         preferred = mode_cfg["categories"]
-        _cats, layout = cb.resolve_sdr_layout_and_categories(root, scan_mode, preferred)
         parent = self.window() or self
 
         # 2-stem: many song folders with exactly 2 files → offer process-all as pairs.
         if set(preferred) == {"instrumental", "vocals"}:
-            pair_hint = cb.build_pair_folder_process_all_hint(root, scan_mode)
+            pair_hint = preflight.get("pair_hint")
             if pair_hint and pair_hint.get("should_ask_process_all"):
                 if ask_yes_no(
                     parent,
@@ -742,25 +803,25 @@ class ClassifyTab(QWidget):
                     params["sdr_categories"] = ("instrumental", "vocals")
                     params["sdr_layout"] = cb.SDR_LAYOUT_MUSDB
                     params["sdr_pair_process_all"] = True
-                    return True
+                    return
                 # Keywords only: still use improved name matching (no force).
 
+        layout = preflight.get("layout")
         # Loose-file layouts (and unknown flat dumps) can leave unmarked tracks behind.
         if layout not in (
             cb.SDR_LAYOUT_SINGLE_FLAT,
             cb.SDR_LAYOUT_MIXED_FLAT,
             None,
         ):
-            return True
+            return
 
-        # Same ≥10 rule for instrumental and vocals/acapella/vocal.
-        candidates: list[dict] = []
-        for kind in ("instrumental", "vocals"):
-            hint = cb.build_single_stem_folder_hint(root, scan_mode, kind)
-            if hint and hint.get("should_ask_process_all"):
-                candidates.append(hint)
+        candidates = [
+            h
+            for h in (preflight.get("flat_hints") or [])
+            if h and h.get("should_ask_process_all")
+        ]
         if not candidates:
-            return True
+            return
         hint = max(candidates, key=lambda h: int(h.get("keyword_matches") or 0))
         kind = str(hint["kind"])
         title = (
@@ -779,7 +840,6 @@ class ClassifyTab(QWidget):
             params["sdr_layout"] = cb.SDR_LAYOUT_SINGLE_FLAT
             params["sdr_flat_process_all"] = True
             params["sdr_user_picked_category"] = True
-        return True
 
     def _wire_worker(self, worker: BaseWorker) -> None:
         worker.log_line.connect(self._forward_worker_log)
@@ -795,6 +855,9 @@ class ClassifyTab(QWidget):
 
     def _on_worker_done(self) -> None:
         kind = self._worker_kind
+        # Preflight uses finished_result, not finished_ok — ignore stray signals.
+        if kind == "sdr_preflight":
+            return
         saw_rms_done = self._rms_saw_done
         self._worker = None
         self._worker_kind = None
@@ -1061,8 +1124,11 @@ class ClassifyTab(QWidget):
             if d.get("model_label") in cb.MODELS:
                 self.model_combo.setCurrentText(d["model_label"])
             stem_mode = cb.resolve_stem_mode(d.get("stem_mode") or "")
-            if stem_mode in cb.STEM_MODES:
+            allowed_modes = self._allowed_stem_modes(self.model_combo.currentText())
+            if stem_mode in allowed_modes:
                 self.stem_combo.setCurrentText(stem_mode)
+            elif stem_mode.startswith('6 ') and any(m.startswith('4 ') for m in allowed_modes):
+                self.stem_combo.setCurrentText(next(m for m in allowed_modes if m.startswith('4 ')))
             if d.get("quality") in cb.QUALITY_PRESETS:
                 self.quality_combo.setCurrentText(d["quality"])
             else:
@@ -1180,6 +1246,9 @@ def register(window, settings: SettingsStore) -> None:
     tab.request_log.connect(window.append_log)
     tab.request_sdr_log.connect(window.append_sdr_log)
     tab.request_open_player.connect(lambda: window._open_player())
+    # Footer Device: tracks Classify ORT preference (not a one-shot torch probe).
+    tab.use_cuda.toggled.connect(lambda checked: window.refresh_device_status(bool(checked)))
+    window.refresh_device_status()
     window.show_action_bar("Classify")
     # Show the Classify action bar as the initial one
     window.tabs.setCurrentIndex(0)

@@ -54,6 +54,7 @@ datas += [('key_tagger/model.py', 'key_tagger')]
 datas += [('key_tagger/log_pace.py', 'key_tagger')]
 datas += [('key_tagger/requirements.txt', 'key_tagger')]
 datas += [('demucs_onnx.py', '.')]
+datas += [('vocal_classifier_onnx.py', '.')]
 datas += [('ort_util.py', '.')]
 
 try:
@@ -74,6 +75,7 @@ try:
         'nvidia.cublas',
         'nvidia.cuda_runtime',
         'nvidia.cuda_nvrtc',
+        'nvidia.cufft',
     ):
         try:
             _nd, _nb, _nh = _collect_all(_nv_pkg)
@@ -103,12 +105,12 @@ hiddenimports += list(_PYSIDE6_KEEP)
 hiddenimports += ['shiboken6']
 hiddenimports += ['classify_backend', 'pair_matcher', 'stem_align',
                   'ffmpeg_bootstrap', 'mp3val_bootstrap', 'flac_bootstrap', 'deps_bootstrap', 'tagger_launch',
-                  'demucs_onnx', 'ort_util',
+                  'demucs_onnx', 'vocal_classifier_onnx', 'ort_util',
                   'panns_enrich',
                   'resource_monitor',
                   'update_checker', 'single_instance', 'done_sound',
                   'audio_resample',
-                  'sounddevice', 'soundfile', 'numpy', 'soxr', 'mutagen', 'tqdm',
+                  'sounddevice', 'soundfile', 'numpy', 'soxr', 'mutagen',
                   'librosa', 'audioread', 'flac_detective',
                   'track_renamer.engine', 'track_renamer.folder_scanner',
                   'track_renamer.audio_preview', 'track_renamer.instrument_enrich',
@@ -284,7 +286,7 @@ print(
 
 # --- Installer slim-down: drop unused / duplicate binaries after Analysis ---
 # Each pattern below is a guaranteed- or near-zero-risk size win. Combined they
-# remove ~0.8 GB from the onedir. See AGENTS.md "Phase A" for the rationale.
+# remove ~0.8 GB from the onedir. See AGENTS.md for the rationale.
 import os as _os
 def _binary_dest_name(b):
     # b is (src, dest); normalise to forward slashes for substring checks.
@@ -299,9 +301,35 @@ _SIZE_DROP_SUBSTR = (
     # Alternate-build NVRTC blob (~86 MB). nvrtc64_120_0.dll (the canonical one)
     # is retained; the .alt variant is only for rare kernel-compile paths.
     'nvrtc64_120_0.alt.dll',
+    # Stray system-CUDA companions never loaded by ORT CUDA EP (~290 MB).
+    # Analysis PATH-picks system toolkit copies when CUDA DLLs are scanned.
+    'cusparse',
+    'curand',
+    'nvjitlink',
+    'cufftw',
 )
+# Path/data drops (matched against dest/src, case-insensitive).
+_SIZE_DROP_DATA_SUBSTR = (
+    'nvidia/nvjitlink',
+    'nvidia\\nvjitlink',
+)
+
+def _drop_size_toc(entry):
+    # TOC entry is (name/dest, path/src, typecode) after Analysis, or (src, dest)
+    # for our pre-Analysis lists. Handle both.
+    if len(entry) >= 2:
+        blob = f'{entry[0]}::{entry[1]}'.replace('\\', '/').lower()
+    else:
+        blob = str(entry[0]).replace('\\', '/').lower()
+    if any(s in blob for s in _SIZE_DROP_SUBSTR):
+        return True
+    if any(s.replace('\\', '/') in blob for s in _SIZE_DROP_DATA_SUBSTR):
+        return True
+    return False
+
 _b_b, _d_b = len(a.binaries), len(a.datas)
-a.binaries = [b for b in a.binaries if not any(s in _binary_dest_name(b) for s in _SIZE_DROP_SUBSTR)]
+a.binaries = [b for b in a.binaries if not _drop_size_toc(b)]
+a.datas = [d for d in a.datas if not _drop_size_toc(d)]
 # ffplay.exe (~98 MB) ships in ffmpeg/ but the app only ever spawns ffmpeg.exe.
 if not str(_os.environ.get('STEM_KEEP_FFPLAY', '')).strip():
     a.binaries = [b for b in a.binaries if 'ffmpeg/ffplay.exe' not in _binary_dest_name(b)

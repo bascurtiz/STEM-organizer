@@ -10,6 +10,7 @@ guards prevent stale callbacks from overwriting newer state.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import traceback
@@ -26,12 +27,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     CaptionLabel,
     CheckBox,
     ComboBox,
     PrimaryPushButton,
     PushButton,
+    RoundMenu,
 )
 
 from track_renamer.category_palette import (
@@ -44,6 +47,7 @@ from track_renamer.category_palette import (
 from track_renamer.engine.defaults import (
     make_default_rules,
     make_demo_tracks,
+    make_samplepack_rules,
 )
 from track_renamer.engine.models import Rule, rule_from_dict, rule_to_dict
 from track_renamer.engine.processor import compute_preview_row, prepare_rules
@@ -73,6 +77,96 @@ from .theme import TIPS
 
 
 PRESETS_DIR = Path.home() / ".track_renamer" / "presets"
+
+# Word-split regex for names that have no underscore structure (e.g.
+# "Cymatics - INSTR Loud Kalimba - C"): whitespace AND standalone dashes
+# act as separators, so each word becomes a clickable label part.
+_SEGMENT_WORD_RE = re.compile(r"[\s\-]+")
+# Word-level separator used by Cymatics-style names (space-dash-space).
+# When an underscore part ALSO contains one of these, the part is further
+# split into words ("01_Gospel...105bpm - 01 Bass" → "...", "105bpm",
+# "01", "Bass"). Plain spaces WITHOUT the dash ("Drum Bus") stay whole.
+_MIXED_SEP_RE = re.compile(r"\s-\s")
+
+
+def _tokenize_label_parts(name: str) -> tuple[list[str], list[str]]:
+    """Split *name* into ``(segments, separators)`` that interleave back to
+    the original string, so the picker can render clickable parts with the
+    real separator text between them.
+
+    Rules:
+      * No underscores → pure word mode: whitespace/dash runs are separators
+        ("Cymatics - INSTR Loud Kalimba - C").
+      * Underscores → split on ``_``; each part is one segment UNLESS it
+        contains a `` - `` marker, in which case it is word-split too, so the
+        trailing label in a mixed convention ("...105bpm - 01 Bass") is
+        individually clickable. Plain inner spaces without the dash keep the
+        part whole ("Drum Bus", "Log Drum 2 Variant").
+    """
+    if "_" not in name:
+        segs: list[str] = []
+        seps: list[str] = []
+        for tok in re.split(r"([\s\-]+)", name):
+            if not tok:
+                continue
+            if re.fullmatch(r"[\s\-]+", tok):
+                seps.append(tok)
+            else:
+                segs.append(tok)
+        return segs, seps
+
+    segs = []
+    seps = []
+    for i, part in enumerate(name.split("_")):
+        if i > 0:
+            seps.append("_")
+        if not part:
+            continue
+        if _MIXED_SEP_RE.search(part):
+            # Mixed convention part — split fully into words.
+            for tok in re.split(r"([\s\-]+)", part):
+                if not tok:
+                    continue
+                if re.fullmatch(r"[\s\-]+", tok):
+                    if segs:  # separator only between segments
+                        seps.append(tok)
+                else:
+                    segs.append(tok)
+        else:
+            segs.append(part.strip())
+    return segs, seps
+
+
+def _split_label_segments(name: str) -> list[str]:
+    """Clickable label parts for the samplepack picker.
+
+    Underscore-delimited names (the common samplepack convention) split on
+    ``_``, keeping plain inner spaces whole ("Drum Bus"). Names with NO
+    underscores fall back to word-level tokens, so a label like ``INSTR``
+    inside ``Cymatics - INSTR Loud Kalimba - C`` is still clickable. Mixed
+    names (``01_Gospel_Hits_3_Ebmin_105bpm - 01 Bass``) split underscore
+    parts that carry a `` - `` marker into words, so ``Bass`` is clickable
+    too. The SAME function drives the picker dialog and the label extractor,
+    so the segment index the user clicks always maps to the same part when
+    labels are harvested across all files.
+    """
+    segs, _ = _tokenize_label_parts(name)
+    return segs
+
+
+def _segment_separators(name: str, segments: list[str]) -> list[str]:
+    """Separator text between ``segments`` for the picker's display.
+
+    Uses the SAME tokenizer as ``_split_label_segments`` so the dialog
+    renders the ORIGINAL filename (underscores for underscore parts, the
+    real `` - `` / space runs for word-split parts) with just the words
+    clickable — never a reconstructed string that swaps in underscores.
+    """
+    _segs, seps = _tokenize_label_parts(name)
+    n = max(0, len(segments) - 1)
+    if len(seps) >= n:
+        return seps[:n]
+    return [" " for _ in range(n)]
 
 
 def _ask_preset_name(parent: QWidget) -> str:
@@ -196,6 +290,14 @@ class TrackRenamerApp(QWidget):
         self._busy = False
         self._destructive_busy = False
         self._applied_rules_fingerprint = self._rules_fingerprint(self.rules)
+        self._samplepack_labels: dict[str, int] = {}  # label → count
+        self._samplepack_enabled = False
+        self._samplepack_segment_idx: int = -1
+        # Folder the current segment pick belongs to. Guards the picker dialog:
+        # it only auto-pops when the input folder CHANGES (or Re-pick is used),
+        # not on every re-scan of the same folder (e.g. after a rename).
+        self._samplepack_picked_folder: Optional[Path] = None
+        self._pre_samplepack_preset: str = "Default"  # restore on uncheck
 
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -224,14 +326,19 @@ class TrackRenamerApp(QWidget):
         self._root.setContentsMargins(0, 0, 0, 0)
         self._root.setSpacing(theme.ACTION_ROW_TOP_GAP)
 
-        # Body holds left|side when undocked; side docks beside the host tab bar
-        # in Rename mode so PATH aligns with the "Rename" tab label.
+        # Body holds left|divider|side when undocked; side docks beside the
+        # host tab bar in Rename mode so PATH aligns with the "Rename" tab
+        # label. Both panels share stretch=1, so on a wide window they split
+        # the body 50/50 and inner inputs (preset dropdown, folder path)
+        # grow right along with them. An invisible 4-px divider (painted the
+        # page background color) sits between the two so the split keeps its
+        # spacing without a visible seam.
         self._body = QWidget()
         self._body_lay = QHBoxLayout(self._body)
         self._body_lay.setContentsMargins(0, 0, 0, 0)
         self._body_lay.setSpacing(0)
 
-        # Left: description+? → presets + Clear/Apply → RULES
+        # Left: description+? → presets + Clear/Apply → RULES.
         self.left_panel = QWidget()
         left_lay = QVBoxLayout(self.left_panel)
         left_lay.setContentsMargins(theme.PAGE_CONTENT_INSET, 12, 0, 0)
@@ -260,9 +367,13 @@ class TrackRenamerApp(QWidget):
         self.preset_menu = ComboBox()
         self.preset_menu.setToolTip(TIPS["preset"])
         self.preset_menu.setMinimumWidth(180)
-        self.preset_menu.setMaximumWidth(280)
+        # Drop the 280-px hard cap so the dropdown stretches with the
+        # left_panel. With QSizePolicy.Expanding the combo fills the gap
+        # between the +/- buttons and the Clear/Apply cluster on wide
+        # windows; on narrow windows (1920-) the minimumWidth=180 floors it.
+        self.preset_menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.preset_menu.currentTextChanged.connect(self._on_preset_changed)
-        presets.addWidget(self.preset_menu)
+        presets.addWidget(self.preset_menu, 1)
         self.save_preset_btn = PushButton("+")
         self.save_preset_btn.setFixedWidth(32)
         self.save_preset_btn.setToolTip(TIPS["save_preset"])
@@ -297,7 +408,7 @@ class TrackRenamerApp(QWidget):
         self.side_panel.setObjectName("RenameSidePanel")
         right_lay = QVBoxLayout(self.side_panel)
         _path_top = max(0, (theme.ACTION_BTN_HEIGHT - theme.SECTION_TITLE_PX) // 2 - 3)
-        # Left 0 — sit flush against the rules scrollbar (no center seam/line)
+        # Left 0 — sit flush against the body divider (no center seam/line)
         right_lay.setContentsMargins(0, _path_top, self._rename_right_inset, 0)
         right_lay.setSpacing(theme.SECTION_GAP)
 
@@ -316,7 +427,23 @@ class TrackRenamerApp(QWidget):
         self.recursive_chk.setChecked(True)
         self.recursive_chk.setToolTip(TIPS["recursive"])
         self.recursive_chk.toggled.connect(self._on_recursive_toggle)
-        paths.body.layout().addWidget(self.recursive_chk)
+
+        self.samplepack_chk = CheckBox("Samplepack")
+        self.samplepack_chk.setChecked(False)
+        self.samplepack_chk.setToolTip(
+            "Detect instrument labels from sample pack filenames. "
+            "After scanning, click a filename segment to identify the label pattern."
+        )
+        self.samplepack_chk.toggled.connect(self._on_samplepack_toggle)
+
+        # Side by side: Include subfolders | Samplepack
+        chk_row = QHBoxLayout()
+        chk_row.setContentsMargins(0, 0, 0, 0)
+        chk_row.setSpacing(16)
+        chk_row.addWidget(self.recursive_chk)
+        chk_row.addWidget(self.samplepack_chk)
+        chk_row.addStretch(1)
+        paths.body.layout().addLayout(chk_row)
         # Recover 3px after PATH/card shift so card bottom still meets Apply.
         paths.body.layout().addSpacing(3)
         # Indent PATH to match PREVIEW left; right edge shares footer inset (no extra pad).
@@ -344,7 +471,24 @@ class TrackRenamerApp(QWidget):
         self.preview_panel.on_override_rename = self._rename_from_prefix_override
         right_lay.addWidget(self.preview_panel, stretch=1)
 
+        # Divider — invisible 4-px seam between the two panels. Sits as child
+        # 1 with stretch=0 and a fixed width; panels either side use stretch=1
+        # so on a wide window the body splits 50/50 minus the 4-px bar.
+        # Painted the page background color (#1e1f26) so the rules and preview
+        # panels read as one continuous surface instead of a grey seam.
+        self._divider = QFrame()
+        self._divider.setObjectName("RenameBodyDivider")
+        self._divider.setFrameShape(QFrame.NoFrame)
+        self._divider.setFixedWidth(4)
+        self._divider.setStyleSheet(
+            f"QFrame#RenameBodyDivider {{"
+            f"background-color: {theme.COLORS['bg']};"
+            f" margin: 4px 0;"
+            f" }}"
+        )
+
         self._body_lay.addWidget(self.left_panel, stretch=1)
+        self._body_lay.addWidget(self._divider)  # fixed width, no stretch
         self._body_lay.addWidget(self.side_panel, stretch=1)
         self._root.addWidget(self._body, stretch=1)
         QTimer.singleShot(0, self._align_preview_header_to_rules)
@@ -391,7 +535,11 @@ class TrackRenamerApp(QWidget):
         QTimer.singleShot(0, self._align_preview_header_to_rules)
 
     def undock_from_host(self) -> None:
-        """Restore PATH+PREVIEW and footer inside the Rename tab page."""
+        """Restore PATH+PREVIEW and footer inside the Rename tab page.
+
+        Re-inserts ``side_panel`` after the divider child so the visual
+        order is ``left_panel | divider | side_panel`` again.
+        """
         if not self._docked:
             return
         self._docked = False
@@ -405,10 +553,14 @@ class TrackRenamerApp(QWidget):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        # First show — body width is now real and the splitter/stretch
+        # allocation reflects the live window.
         QTimer.singleShot(0, self._align_preview_header_to_rules)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
+        # 50/50 panel split is owned by QHBoxLayout(stretch=1) — no cap to
+        # refresh. Re-align the PREVIEW header to the new RULES height.
         QTimer.singleShot(0, self._align_preview_header_to_rules)
 
     def _align_preview_header_to_rules(self) -> None:
@@ -554,11 +706,74 @@ class TrackRenamerApp(QWidget):
             # Always clear busy — even if preview setup raises — so elapsed stops.
             self._set_busy(False, "Idle")
 
+        if self._samplepack_enabled and self.tracks:
+            QTimer.singleShot(100, self._maybe_detect_samplepack_labels)
+
     def _on_recursive_toggle(self, checked: bool) -> None:
         self.recursive = bool(checked)
         self._schedule_save()
         if self.folder_path is not None and not self._busy:
             self._scan_folder(self.folder_path)
+
+    def _on_samplepack_toggle(self, checked: bool) -> None:
+        self._samplepack_enabled = bool(checked)
+        self._schedule_save()
+        if checked:
+            # Save current preset name, then switch to clean Samplepack template
+            self._pre_samplepack_preset = self.preset_menu.currentText() or "Default"
+            self._ensure_samplepack_preset()
+            self._samplepack_labels = {}
+            self._samplepack_segment_idx = -1
+            self.rules_panel.set_samplepack_labels({}, None)
+            # Load the Samplepack preset (empty keywords, same prefixes)
+            self.preset_menu.blockSignals(True)
+            self._refresh_preset_menu()
+            self.preset_menu.setCurrentText("Samplepack")
+            self.preset_menu.blockSignals(False)
+            self._load_preset("Samplepack")
+        else:
+            self._samplepack_labels = {}
+            self._samplepack_segment_idx = -1
+            # Re-arm the picker: re-enabling Samplepack on the same folder is an
+            # explicit re-engagement, so the dialog should pop again then (a
+            # plain re-scan of an unchanged folder must NOT — that is the guard
+            # in _maybe_detect_samplepack_labels).
+            self._samplepack_picked_folder = None
+            self.rules_panel.set_samplepack_labels({}, None)
+            # Restore the previous preset
+            restore = self._pre_samplepack_preset or "Default"
+            self.preset_menu.blockSignals(True)
+            self.preset_menu.setCurrentText(restore)
+            self.preset_menu.blockSignals(False)
+            self._load_preset(restore)
+        if self.folder_path is not None and not self._busy:
+            self._scan_folder(self.folder_path)
+
+    def _ensure_samplepack_preset(self) -> None:
+        """Create/refresh the Samplepack preset JSON — always writes from code template."""
+        path = PRESETS_DIR / "Samplepack.json"
+        if path.is_file():
+            # Check if stale (missing affix keys); regenerate if so.
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                first_cat = None
+                for r in data.get("rules", []):
+                    if r.get("op") == "categoryBundle":
+                        cats = r.get("params", {}).get("categories", [])
+                        if cats:
+                            first_cat = cats[0]
+                            break
+                if first_cat and "affix" in first_cat:
+                    return  # already valid, keep user-assigned keywords
+            except Exception:
+                pass  # corrupt — regenerate below
+        rules = make_samplepack_rules()
+        from track_renamer.engine.models import rule_to_dict
+
+        path.write_text(
+            json.dumps({"rules": [rule_to_dict(r) for r in rules]}, indent=2),
+            encoding="utf-8",
+        )
 
     # ----- rename -----
 
@@ -979,13 +1194,20 @@ class TrackRenamerApp(QWidget):
 
     def settings_snapshot(self) -> dict:
         self.rules = self.rules_panel.get_rules()
-        return {
+        snap = {
             "rename_folder": display_path(self.folder_row.text()),
             "rename_recursive": bool(self.recursive_chk.isChecked()),
+            "rename_samplepack": bool(self.samplepack_chk.isChecked()),
             "rename_preset": self.preset_menu.currentText() or "Default",
             "rename_rules": [rule_to_dict(r) for r in self.rules],
             "rename_only_changed": bool(self.preview_panel.only_changed_btn.isChecked()),
         }
+        # Persist which folder the label segment was picked for, so a restart
+        # with the SAME input folder does not re-pop the picker (only a changed
+        # folder or the Re-pick button should).
+        snap["rename_samplepack_folder"] = display_path(self._samplepack_picked_folder)
+        snap["rename_samplepack_segment"] = int(self._samplepack_segment_idx)
+        return snap
 
     def load_settings(self) -> None:
         if self._settings is None:
@@ -995,6 +1217,28 @@ class TrackRenamerApp(QWidget):
             d = self._settings.data
             self.recursive = bool(d.get("rename_recursive", True))
             self.recursive_chk.setChecked(self.recursive)
+
+            samplepack = bool(d.get("rename_samplepack", False))
+            self.samplepack_chk.blockSignals(True)
+            self.samplepack_chk.setChecked(samplepack)
+            self.samplepack_chk.blockSignals(False)
+            self._samplepack_enabled = samplepack
+            if samplepack:
+                self._pre_samplepack_preset = str(d.get("rename_preset") or "Default")
+                self._ensure_samplepack_preset()
+                # Restore the folder/segment the label picker was last used on,
+                # so scanning the same folder after a restart reuses it silently.
+                picked = str(d.get("rename_samplepack_folder") or "").strip()
+                try:
+                    self._samplepack_picked_folder = Path(picked) if picked else None
+                except Exception:
+                    self._samplepack_picked_folder = None
+                try:
+                    self._samplepack_segment_idx = int(
+                        d.get("rename_samplepack_segment", -1)
+                    )
+                except (TypeError, ValueError):
+                    self._samplepack_segment_idx = -1
 
             folder = str(d.get("rename_folder") or "").strip()
             if folder:
@@ -1014,9 +1258,11 @@ class TrackRenamerApp(QWidget):
                     loaded_rules = False
 
             preset = str(d.get("rename_preset") or "Default")
+            if self._samplepack_enabled:
+                preset = "Samplepack"
             names = self._preset_names()
             if preset not in names:
-                preset = "Default"
+                preset = "Samplepack" if self._samplepack_enabled else "Default"
             self.preset_menu.blockSignals(True)
             self.preset_menu.setCurrentText(preset)
             self.preset_menu.blockSignals(False)
@@ -1038,6 +1284,7 @@ class TrackRenamerApp(QWidget):
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.setInterval(200)
         self._autosave_timer.timeout.connect(self._flush_settings)
+        self.samplepack_chk.toggled.connect(self._schedule_save)
         self.folder_row.entry.textChanged.connect(self._schedule_save)
         self.preview_panel.only_changed_btn.toggled.connect(self._schedule_save)
 
@@ -1087,6 +1334,7 @@ class TrackRenamerApp(QWidget):
         for w in (
             self.folder_row,
             self.recursive_chk,
+            self.samplepack_chk,
             self.preset_menu,
             self.save_preset_btn,
             self.delete_preset_btn,
@@ -1187,6 +1435,467 @@ class TrackRenamerApp(QWidget):
     def shutdown(self) -> None:
         self.preview_panel.shutdown()
         self.audio_player.shutdown()
+
+    # ----- samplepack label detection -----
+
+    def _maybe_detect_samplepack_labels(self) -> None:
+        """Show the label picker only when the input folder changed.
+
+        Re-scans of the SAME folder (rename finish, recursive toggle, Samplepack
+        re-check) reuse the stored segment index so counts stay fresh — the
+        picker re-appears only for a new folder, or via the Re-pick button.
+        """
+        if not self._samplepack_enabled or not self.tracks:
+            return
+        if self._samplepack_picked_folder == self.folder_path:
+            # Same folder: no dialog. Re-extract with the stored segment so
+            # label counts reflect the freshly scanned file set.
+            if self._samplepack_segment_idx >= 0:
+                self._extract_samplepack_labels()
+            return
+        self._samplepack_picked_folder = self.folder_path
+        self._samplepack_segment_idx = -1
+        self._samplepack_labels = {}
+        self.rules_panel.set_samplepack_labels({}, None)
+        first = self.tracks[0]
+        self._pick_samplepack_segment(first.name)
+
+    def _pick_samplepack_segment(self, filename: str) -> None:
+        """Show a dialog where the user clicks a segment directly in the filename.
+
+        Each underscore-separated segment is a clickable link. Hovering highlights
+        it with a smooth fade-in; clicking selects it (persistent highlight).
+        """
+        from PySide6.QtWidgets import QDialog, QHBoxLayout as _QH, QLabel, QVBoxLayout as _QV
+
+        from ..widgets.action_button import action_button
+
+        segments = _split_label_segments(filename)
+        if not segments:
+            show_info(self, "Samplepack", "Could not split filename into segments: " + filename)
+            return
+        # Real separators ("_" for underscore names; the dash/space runs for
+        # word-split names) so the clickable parts render like the original
+        # filename instead of a reconstructed underscore string.
+        seps = _segment_separators(filename, segments)
+
+        t = theme.DARK
+        ACCENT = "#7c5cff"  # same purple as checkboxes / OK button
+        FN_BG = theme.COLORS.get("bg", "#1e1f26")  # filename box fill
+        host = self.window() if self.window() is not None else self
+        dlg = QDialog(host)
+        dlg.setWindowTitle("Samplepack — Identify Label")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(580)
+        dlg.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dlg.setAttribute(Qt.WA_TranslucentBackground)
+
+        outer = _QV(dlg)
+        outer.setContentsMargins(12, 12, 12, 12)
+        card = QFrame()
+        card.setObjectName("HelpCard")
+        r = theme.DIALOG_CORNER_RADIUS
+        card.setStyleSheet(
+            f"""
+            QFrame#HelpCard {{
+                background-color: {t['panel']};
+                border: 1px solid {t['border']};
+                border-radius: {r}px;
+            }}
+            """
+        )
+        lay = _QV(card)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(10)
+
+        # Header
+        lbl = BodyLabel("Click the sample label within the filename")
+        if hasattr(lbl, "setTextColor"):
+            lbl.setTextColor(t["text"], t["text"])
+        lbl.setAlignment(Qt.AlignCenter)
+        lay.addWidget(lbl)
+
+        hint = CaptionLabel("Hover to preview  ·  Click to select  ·  Underscores or words separate parts")
+        hint.setWordWrap(True)
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet(f"color: {t['text_dim']}; font-size: 9pt;")
+        lay.addWidget(hint)
+
+        DIM_COLOR = t.get("text_mute", "#888")
+        HL_COLOR = "#ffffff"
+        SEP_COLOR = "#444"
+
+        selected_idx = [-1]
+
+        def _lerp_hex(c1: str, c2: str, t: float) -> str:
+            """Linear interpolate between two #RRGGBB hex colors. t: 0.0→1.0."""
+            t = max(0.0, min(1.0, t))
+            r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+            r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+            r = int(r1 + (r2 - r1) * t)
+            g = int(g1 + (g2 - g1) * t)
+            b = int(b1 + (b2 - b1) * t)
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        def _build_fn_html(highlight_idx: int = -1, fade: float = 0.0) -> str:
+            """Build rich-text HTML. fade: 0.0→1.0 for both bg and text color.
+
+            The highlight background is a SOLID 6-digit hex pre-blended toward
+            the purple accent. Never emit #RRGGBBAA — Qt parses 8-digit hex as
+            #AARRGGBB (alpha first), which turned #7c5cff55 into a green
+            (seagreen) highlight. Segments are joined with their ORIGINAL
+            separators (underscores, or the dashes/spaces from word-split
+            names) so the dialog reads like the real filename.
+            """
+            txt = _lerp_hex(DIM_COLOR, HL_COLOR, fade)
+            bg = _lerp_hex(FN_BG, ACCENT, fade)
+            parts = []
+            for s_idx, seg in enumerate(segments):
+                if s_idx > 0:
+                    sep_txt = seps[s_idx - 1] if s_idx - 1 < len(seps) else "_"
+                    parts.append(f'<span style="color:{SEP_COLOR}">{sep_txt}</span>')
+                if s_idx == highlight_idx:
+                    parts.append(
+                        f'<a href="{s_idx}" style="color:{txt};font-weight:bold;'
+                        f'background-color:{bg};border-radius:3px;'
+                        f'padding:1px 5px;text-decoration:none;">{seg}</a>'
+                    )
+                else:
+                    parts.append(
+                        f'<a href="{s_idx}" style="color:{DIM_COLOR};'
+                        f'text-decoration:none;">{seg}</a>'
+                    )
+            return "".join(parts)
+
+        # Filename in a subtle box
+        fn_box = QFrame()
+        fn_box.setObjectName("FnBox")
+        fn_box.setStyleSheet(
+            f"QFrame#FnBox {{"
+            f"background-color: {theme.COLORS.get('bg', '#1e1f26')};"
+            f"border: 1px solid {t['border']};"
+            f"border-radius: 6px;"
+            f"}}"
+        )
+        fn_box_lay = _QV(fn_box)
+        fn_box_lay.setContentsMargins(0, 0, 0, 0)
+
+        fn_lbl = QLabel()
+        fn_lbl.setWordWrap(True)
+        fn_lbl.setAlignment(Qt.AlignCenter)
+        fn_lbl.setTextFormat(Qt.RichText)
+        fn_lbl.setOpenExternalLinks(False)
+        fn_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        fn_lbl.setStyleSheet(
+            f"background: transparent; "
+            f"font-family: '{theme.FONT_FAMILY_MONO}'; font-size: 14pt; "
+            f"border: none; padding: 10px 14px;"
+        )
+        fn_box_lay.addWidget(fn_lbl)
+
+        fn_lbl.setText(_build_fn_html(-1, 0.0))
+
+        # Fade timer for smooth hover transitions (bg + text)
+        _fade_timer = QTimer(dlg)
+        _fade_timer.setInterval(16)  # ~60 fps
+        _fade_target = [-1]   # target highlight index
+        _fade = [0.0]         # current fade 0.0→1.0
+        _fade_step = 0.05     # per tick (~320ms for full fade — smooth ease)
+
+        def _fade_tick():
+            f = _fade[0]
+            target_idx = _fade_target[0]
+            if target_idx < 0:
+                f = max(0.0, f - _fade_step)
+                _fade[0] = f
+                if f <= 0.0:
+                    _fade_timer.stop()
+                    if selected_idx[0] < 0:
+                        fn_lbl.setText(_build_fn_html(-1, 0.0))
+                    return
+                if selected_idx[0] < 0:
+                    fn_lbl.setText(_build_fn_html(target_idx, f))
+            else:
+                f = min(1.0, f + _fade_step)
+                _fade[0] = f
+                if f >= 1.0:
+                    _fade_timer.stop()
+                if selected_idx[0] < 0:
+                    fn_lbl.setText(_build_fn_html(target_idx, f))
+
+        _fade_timer.timeout.connect(_fade_tick)
+
+        def _on_hover(href: str) -> None:
+            if selected_idx[0] >= 0:
+                return
+            try:
+                idx = int(href)
+            except (ValueError, TypeError):
+                idx = -1
+            if idx == _fade_target[0]:
+                return  # already targeting this segment
+            _fade_target[0] = idx
+            # Don't reset alpha on re-hover — let the fade continue from current
+            _fade_timer.start()
+
+        def _on_click(href: str) -> None:
+            _fade_timer.stop()
+            try:
+                idx = int(href)
+                selected_idx[0] = idx
+                fn_lbl.setText(_build_fn_html(idx, 1.0))
+            except (ValueError, TypeError):
+                pass
+
+        fn_lbl.linkHovered.connect(_on_hover)
+        fn_lbl.linkActivated.connect(_on_click)
+        lay.addWidget(fn_box)
+
+        # Buttons
+        btns = _QH()
+        btns.setContentsMargins(4, 0, 4, 0)
+        btns.addStretch(1)
+        cancel = action_button(
+            "Cancel", on_click=dlg.reject, parent=card, tip="Dismiss without detecting labels."
+        )
+        ok = action_button(
+            "OK", on_click=dlg.accept, accent=True, parent=card, tip="Detect sample labels from all files."
+        )
+        ok.setMinimumWidth(80)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        lay.addLayout(btns)
+        outer.addWidget(card)
+
+        from ..widgets.dialogs import dim_behind
+
+        dlg.adjustSize()
+        if host is not None:
+            hg = host.frameGeometry()
+            dg = dlg.frameGeometry()
+            dlg.move(
+                hg.x() + max(0, (hg.width() - dg.width()) // 2),
+                hg.y() + max(0, (hg.height() - dg.height()) // 2),
+            )
+
+        with dim_behind(host):
+            if dlg.exec() != QDialog.Accepted:
+                return
+
+        if selected_idx[0] < 0:
+            show_info(self, "Samplepack", "Please click a segment first to identify the label position.")
+            return
+
+        self._samplepack_segment_idx = selected_idx[0]
+        self._extract_samplepack_labels()
+
+    def _extract_samplepack_labels(self) -> None:
+        """Extract labels from all tracks using the selected segment index.
+
+        Normalizes trailing digits so 'Synth Poly 1', 'Synth Poly 2', 'Synth Poly 3'
+        all become one bucket 'Synth Poly'.
+        """
+        _trailing_digits = re.compile(r"\s+\d+$")
+        labels: dict[str, int] = {}
+        idx = self._samplepack_segment_idx
+        if idx < 0:
+            return
+        for track in self.tracks:
+            segments = _split_label_segments(track.name)
+            if len(segments) > idx:
+                label = segments[idx].strip()
+                if label:
+                    # Merge trailing-number variants into one bucket
+                    label = _trailing_digits.sub("", label).strip()
+                    if label:
+                        labels[label] = labels.get(label, 0) + 1
+        self._samplepack_labels = labels
+        self.rules_panel.set_samplepack_labels(
+            labels,
+            self._on_samplepack_label_clicked,
+            self._repick_samplepack_segment,
+            self._auto_assign_samplepack_labels,
+            self._on_samplepack_label_find,
+        )
+
+    def _on_samplepack_label_find(self, label: str, chip_widget=None) -> None:
+        """Right-click a samplepack chip → select the first preview file that
+        carries this label.
+
+        Matches against the SAME segment splitter used to harvest the labels
+        (``_split_label_segments``), so a chip like ``INSTR`` found via the
+        word-split fallback finds ``Cymatics - INSTR Loud Kalimba - C`` and
+        underscore names match by their underscore segments. Selection is
+        case-insensitive; first track wins (model order = folder order).
+        """
+        if not self.tracks:
+            return
+        target = -1
+        for i, track in enumerate(self.tracks):
+            name = getattr(track, "name", "") or ""
+            segs = _split_label_segments(name)
+            if any(s.casefold() == label.casefold() for s in segs):
+                target = i
+                break
+        if target < 0:
+            # Non-blocking status message — a modal per failed right-click
+            # would be heavy for a quick jump gesture.
+            self.status_text.emit(f"No preview file contains the label '{label}'.")
+            return
+        self.preview_panel.select_track_by_index(target)
+
+    def _repick_samplepack_segment(self) -> None:
+        """Reset the segment index and re-open the label picker dialog."""
+        self._samplepack_segment_idx = -1
+        self._samplepack_labels = {}
+        self.rules_panel.set_samplepack_labels({}, None)
+        if self.tracks:
+            self._pick_samplepack_segment(self.tracks[0].name)
+
+    def _on_samplepack_label_clicked(self, label: str, chip_widget=None) -> None:
+        """Show the category context menu when a samplepack chip is clicked."""
+        self.rules = self.rules_panel.get_rules()
+        from track_renamer.category_palette import (
+            category_color,
+            list_category_rules,
+        )
+
+        from .category_icon import category_bar_icon
+
+        categories = [c for c in list_category_rules(self.rules) if getattr(c, "enabled", True)]
+        if not categories:
+            show_info(self, "Samplepack", "Add a Category Macro rule first to use sample labels.")
+            return
+
+        menu = RoundMenu(parent=self)
+        header = Action("Add to category keywords")
+        header.setEnabled(False)
+        menu.addAction(header)
+        for cat in categories:
+            cat_name = (cat.name or "").strip() or (cat.affix or "").strip()
+            if not cat_name:
+                continue
+            action = Action(cat_name, self)
+            # Vertical-bar icon in the category color — matches the chip dash.
+            color = category_color(
+                cat.name, getattr(cat, "color", ""), override=getattr(cat, "color_override", False)
+            )
+            action.setIcon(category_bar_icon(color))
+            action.triggered.connect(
+                lambda checked=False, c=cat, lbl=label: self._add_samplepack_label_to_category(c, lbl)
+            )
+            menu.addAction(action)
+
+        # Position menu below the chip that was clicked
+        if chip_widget is not None and isinstance(chip_widget, QWidget):
+            pos = chip_widget.mapToGlobal(QPoint(0, chip_widget.height()))
+        else:
+            pos = self.rules_panel.mapToGlobal(QPoint(100, 100))
+        menu.exec(pos)
+
+    def _add_samplepack_label_to_category(self, category, label: str) -> None:
+        """Add a samplepack label to a category's keywords, hide the chip, re-render, and persist."""
+        self.rules = self.rules_panel.get_rules()
+        cat_dict = self._find_category_in_rules(category.name)
+        if cat_dict is None:
+            return
+        existing = [k.strip() for k in cat_dict.get("keywords", "").split(",") if k.strip()]
+        if label not in existing:
+            existing.append(label)
+            cat_dict["keywords"] = ", ".join(existing)
+        # Remove the assigned label from the chips so it disappears. Sync the
+        # reduced set into the panel (its chip host holds its own copy), then a
+        # SINGLE re-render via set_rules() picks it up in _refresh_samplepack_chips.
+        self._samplepack_labels.pop(label, None)
+        self.rules_panel.update_samplepack_labels(self._samplepack_labels)
+        self.rules_panel.set_rules(self.rules)
+        self._on_rules_changed()
+        # Persist the updated Samplepack preset to disk
+        path = PRESETS_DIR / "Samplepack.json"
+        try:
+            path.write_text(
+                json.dumps({"rules": [rule_to_dict(r) for r in self.rules]}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # non-critical — assignments survive in-memory this session
+
+    def _find_category_in_rules(self, name: str) -> dict | None:
+        """Find a category dict by name in the current rules."""
+        from track_renamer.engine.models import ConditionGroup, OpRule
+
+        def walk(rule):
+            if isinstance(rule, OpRule) and rule.op == "categoryBundle":
+                for cat in rule.params.get("categories", []):
+                    if isinstance(cat, dict) and (cat.get("name") or "").strip() == (name or "").strip():
+                        return cat
+            elif isinstance(rule, ConditionGroup):
+                for child in rule.children:
+                    result = walk(child)
+                    if result:
+                        return result
+            return None
+
+        for rule in self.rules:
+            result = walk(rule)
+            if result:
+                return result
+        return None
+
+    def _auto_assign_samplepack_labels(self) -> None:
+        """Bulk-assign every chip whose words match an enabled category prefix.
+
+        Uses the same matcher as the chip outline color
+        (match_label_to_category, which expands singular/plural variants and
+        matches category names + keywords), so a colored chip always lands in
+        the category it was tinted for. Matched labels are appended to that
+        category's keywords; unmatched labels stay as chips for manual
+        assignment. All keyword edits + re-render + persist happen once.
+        """
+        from track_renamer.category_palette import (
+            list_category_rules,
+            match_label_to_category,
+        )
+
+        self.rules = self.rules_panel.get_rules()
+
+        # Candidate set: enabled categories only (consistent with the click menu).
+        enabled = [c for c in list_category_rules(self.rules) if getattr(c, "enabled", True)]
+
+        # Decide a target category per label, batching the keyword appends.
+        assignments: dict[str, list[str]] = {}  # category_name -> [labels]
+        leftover: dict[str, int] = {}
+        for label, cnt in self._samplepack_labels.items():
+            name, _color = match_label_to_category(label, enabled)
+            if name:
+                assignments.setdefault(name, []).append(label)
+            else:
+                leftover[label] = cnt
+
+        for cat_name, labels in assignments.items():
+            cat_dict = self._find_category_in_rules(cat_name)
+            if cat_dict is None:
+                continue
+            existing = [k.strip() for k in cat_dict.get("keywords", "").split(",") if k.strip()]
+            for lbl in labels:
+                if lbl not in existing:
+                    existing.append(lbl)
+            cat_dict["keywords"] = ", ".join(existing)
+
+        # Drop matched labels from the chip set. Sync into the panel (its chip
+        # host holds its own copy), then a SINGLE re-render + persist.
+        self._samplepack_labels = leftover
+        self.rules_panel.update_samplepack_labels(self._samplepack_labels)
+        self.rules_panel.set_rules(self.rules)
+        self._on_rules_changed()
+        path = PRESETS_DIR / "Samplepack.json"
+        try:
+            path.write_text(
+                json.dumps({"rules": [rule_to_dict(r) for r in self.rules]}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass  # non-critical — assignments survive in-memory this session
 
     @property
     def destructive_busy(self) -> bool:

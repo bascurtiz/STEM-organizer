@@ -180,9 +180,20 @@ def run_corruption_detect(
         return stop_event is not None and stop_event.is_set()
 
     t0 = time.monotonic()
-    ffmpeg_bin = find_ffmpeg()
+    ffmpeg_bin = find_ffmpeg(ensure=False)
     flac_bin = find_flac(ensure=False)
     mp3val_bin = find_mp3val(mp3val_path, ensure=False)
+    if mode in ("deep", "both") and not ffmpeg_bin:
+        log("ffmpeg not found locally — downloading once into ffmpeg\\ …", "info")
+        ffmpeg_bin = find_ffmpeg(ensure=True)
+        if ffmpeg_bin:
+            log(f"  ffmpeg: {ffmpeg_bin}", "info")
+        else:
+            log(
+                "  ffmpeg download failed — Deep verify limited "
+                "(FLAC-only if flac present).",
+                "warn",
+            )
     if mode in ("deep", "both") and not flac_bin:
         log("flac not found locally — downloading once into flac\\ …", "info")
         flac_bin = find_flac(ensure=True)

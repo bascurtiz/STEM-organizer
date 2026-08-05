@@ -303,7 +303,7 @@ def load_ml_deps(set_status=None):
     (avoids co-loading torch+ORT which froze the dev machine). Returns
     ``(np, sf, None, None, None, None)`` on the ONNX path.
 
-    STEM_ONNX=0 or missing ``htdemucs.onnx``: full torch + demucs stack.
+    STEM_ONNX=0 or missing HTDemucs/Vocal CNN6 weights: full torch + demucs stack (legacy).
     """
     def status(msg: str) -> None:
         if set_status is not None:
@@ -319,13 +319,24 @@ def load_ml_deps(set_status=None):
     status('Loading soundfile…')
     import soundfile as sf
 
-    # Prefer Demucs ONNX — skip torch entirely when the weight is present.
+    # Prefer HTDemucs / Vocal CNN6 ONNX — skip torch entirely when any
+    # separator/classifier weight is present (avoids co-loading torch+ORT).
     try:
-        from demucs_onnx import resolve_htdemucs_onnx, stem_onnx_enabled
+        from demucs_onnx import resolve_htdemucs_onnx
 
-        if stem_onnx_enabled() and resolve_htdemucs_onnx() is not None:
-            status('Demucs ONNX ready (torch not loaded)…')
+        if resolve_htdemucs_onnx() is not None:
+            status('HTDemucs ONNX ready (torch not loaded)…')
             import onnxruntime  # noqa: F401 — fail early if missing
+
+            return np, sf, None, None, None, None
+    except ImportError:
+        pass
+    try:
+        from vocal_classifier_onnx import vocal_classifier_installed
+
+        if vocal_classifier_installed():
+            status('Vocal CNN6 ONNX ready (torch not loaded)…')
+            import onnxruntime  # noqa: F401
 
             return np, sf, None, None, None, None
     except ImportError:
@@ -342,10 +353,27 @@ def load_ml_deps(set_status=None):
 
 
 def demucs_onnx_present() -> bool:
+    """True when any Classify separator ONNX weight is bundled."""
     try:
-        from demucs_onnx import resolve_htdemucs_onnx, stem_onnx_enabled
+        from demucs_onnx import resolve_htdemucs_onnx
 
-        return stem_onnx_enabled() and resolve_htdemucs_onnx() is not None
+        if resolve_htdemucs_onnx() is not None:
+            return True
+    except Exception:
+        pass
+    try:
+        from vocal_classifier_onnx import vocal_classifier_installed
+
+        return bool(vocal_classifier_installed())
+    except Exception:
+        return False
+
+
+def htdemucs_onnx_present() -> bool:
+    try:
+        from demucs_onnx import resolve_htdemucs_onnx
+
+        return resolve_htdemucs_onnx() is not None
     except Exception:
         return False
 
@@ -513,9 +541,21 @@ def demucs_models_present() -> bool:
 
 
 def demucs_model_cached(model_id: str) -> bool:
-    """Best-effort check whether model weights are likely already on disk."""
-    del model_id  # Demucs hub files are hash-named; any checkpoint usually means prior download.
-    return demucs_models_present()
+    """Best-effort check whether the named model's weights are already on disk.
+
+    Retired separator ids (umxl/xumxl/scnet_tran/bsroformer/demucs) route to
+    the HTDemucs check; they all map to HTDemucs at load time.
+    """
+    mid = (model_id or "").strip().lower()
+    if mid == "vocal_cnn6":
+        try:
+            from vocal_classifier_onnx import vocal_classifier_installed
+
+            return bool(vocal_classifier_installed())
+        except Exception:
+            return False
+    # htdemucs + all legacy/retired ids resolve to HTDemucs.
+    return htdemucs_onnx_present()
 
 
 def ensure_ml_deps(*, show_dialog: bool = True, set_status=None) -> bool:

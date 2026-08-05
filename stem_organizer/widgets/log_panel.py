@@ -73,6 +73,8 @@ LOG_STEM_COLORS = {
     "instrumental": "#60A5FA",
     "acapella":     "#a855f7",
     "vocal":        "#a855f7",
+    "guitar":       "#376FAC",
+    "piano":        theme.COLORS["log_fg"],  # #d6dae8 — same as dry badge
     "original":     "#9aa0b4",
 }
 LOG_GG_COLORS = {
@@ -118,6 +120,7 @@ _CHIP_FG_LIGHT = "#FFFFFF"
 
 LOG_GG_FG = {
     "dry": "#262833",
+    "piano": "#262833",  # light dry-style fill needs dark text
     "wet": theme.COLORS["log_fg"],
     "lossless": "#262833",
     "lossy": "#262833",

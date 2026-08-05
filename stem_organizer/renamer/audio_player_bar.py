@@ -36,7 +36,11 @@ _ICON_CACHE: dict[str, QIcon] = {}
 
 
 def _media_icon(kind: str) -> QIcon:
-    """Monochrome play triangle / pause bars as a pixmap icon."""
+    """Monochrome play / pause / prev / next / stop icons as a pixmap icon.
+
+    Painted (no Unicode glyphs): U+23F8 and U+275A are blank/emoji-tile on
+    Windows+Qt fonts, and Fluent PushButton clips painted icons at 32px.
+    """
     cached = _ICON_CACHE.get(kind)
     if cached is not None:
         return cached
@@ -48,6 +52,7 @@ def _media_icon(kind: str) -> QIcon:
     p.setRenderHint(QPainter.Antialiasing, True)
     p.setPen(Qt.NoPen)
     p.setBrush(QColor(theme.COLORS["fg"]))  # light on dark muted button
+    m = max(2, size // 6)
     if kind == "pause":
         bar_w = max(2, size // 5)
         gap = max(2, size // 5)
@@ -57,8 +62,44 @@ def _media_icon(kind: str) -> QIcon:
         h = size - 2 * y0
         p.drawRect(x0, y0, bar_w, h)
         p.drawRect(x0 + bar_w + gap, y0, bar_w, h)
+    elif kind == "stop":
+        # Slightly smaller than the play triangle footprint (visual balance).
+        side = max(4, size - 2 * m - 2)
+        x0 = (size - side) // 2
+        p.drawRect(x0, x0, side, side)
+    elif kind == "prev":
+        # Vertical bar + left-pointing triangle (skip to previous).
+        bar_w = max(2, size // 5)
+        gap = max(2, size // 7)
+        tri_w = max(4, size - m - bar_w - gap)
+        x0 = m + bar_w + gap
+        p.drawRect(m, m, bar_w, size - 2 * m)
+        p.drawPolygon(
+            QPolygon(
+                [
+                    QPoint(x0 + tri_w, m),
+                    QPoint(x0, size // 2),
+                    QPoint(x0 + tri_w, size - m),
+                ]
+            )
+        )
+    elif kind == "next":
+        # Right-pointing triangle + vertical bar (skip to next).
+        bar_w = max(2, size // 5)
+        gap = max(2, size // 7)
+        tri_w = max(4, size - m - bar_w - gap)
+        x0 = m
+        p.drawPolygon(
+            QPolygon(
+                [
+                    QPoint(x0, m),
+                    QPoint(x0 + tri_w, size // 2),
+                    QPoint(x0, size - m),
+                ]
+            )
+        )
+        p.drawRect(x0 + tri_w + gap, m, bar_w, size - 2 * m)
     else:
-        m = max(2, size // 6)
         p.drawPolygon(
             QPolygon(
                 [
@@ -339,8 +380,16 @@ class AudioPlayerBar(QWidget):
                 pass
             self.play_btn.setEnabled(False)
             self.play_btn.setToolTip("Add ffmpeg and ffprobe to preview audio.")
-            msg = getattr(self.service, "unavailable_message", "Audio preview unavailable")
-            self._set_status(str(msg), subdued=True)
+            # First use: fetch a real ffmpeg once in the background (a "tools_ready"
+            # event reloads this track when it lands).
+            self._set_status("Downloading ffmpeg…", subdued=True)
+            try:
+                self.service.ensure_tools_async()
+            except Exception:
+                msg = getattr(
+                    self.service, "unavailable_message", "Audio preview unavailable"
+                )
+                self._set_status(str(msg), subdued=True)
             return
 
         can_play = bool(getattr(self.service, "playback_available", True))
@@ -505,6 +554,17 @@ class AudioPlayerBar(QWidget):
                 )
             elif event_type == "duration":
                 self.wave.set_duration(float(payload))
+            elif event_type == "tools_ready":
+                # Background ffmpeg download finished — reload the active track.
+                if payload and self.active_track is not None and self.active_row is not None:
+                    track, row = self.active_track, self.active_row
+                    self.active_track = None  # force set_active down the load path
+                    self.set_active(track, row)
+                elif not payload:
+                    msg = getattr(
+                        self.service, "unavailable_message", "Audio preview unavailable"
+                    )
+                    self._set_status(str(msg), subdued=True)
             else:
                 message = str(payload).splitlines()[-1] if payload else ""
                 self._set_status(message[:120])

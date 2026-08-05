@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
@@ -20,6 +21,7 @@ from tagger_launch import (
     tagger_subprocess_env,
 )
 
+from ..io_tune import ensure_tuned
 from .tagger_worker import _TAGGER_DECODE_NOISE_RE, format_tagger_exit, gg_log_tag
 
 _PROGRESS_RE = re.compile(
@@ -126,11 +128,37 @@ class KeyWorker(QThread):
         if self._batch_mode:
             script_args.extend(["--log-pace", "0"])
 
+        on_gpu = False
+        try:
+            from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+            on_gpu = bool(
+                os.environ.get("STEM_ORT_CUDA", "1").strip() != "0"
+                and cuda_ep_usable()
+                and nvidia_gpu_present()
+            )
+        except Exception:
+            on_gpu = False
+        script_args.extend(["--device", "cuda" if on_gpu else "cpu"])
+
         env = tagger_subprocess_env()
         env.update(_BLAS_ENV)
         root = tagger_dir.parent
         pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = _join_pp(root, pp)
+
+        if self._batch_mode:
+
+            def _tune_log(msg: str, tag: str = "info") -> None:
+                self.log_line.emit(msg, tag)
+
+            hint = ensure_tuned(
+                input_dir,
+                workload="key",
+                log=_tune_log,
+                inference_on_gpu=on_gpu,
+            )
+            env.setdefault("KEY_CQT_WORKERS", str(hint.audio_workers))
 
         self._progress_t0 = time.monotonic()
         try:

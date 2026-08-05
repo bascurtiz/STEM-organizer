@@ -415,6 +415,42 @@ def make_default_rules() -> list[Rule]:
     ]
 
 
+def make_samplepack_category_bundle() -> OpRule:
+    """Category bundle with empty keywords — clean slate for samplepack label assignment."""
+    from track_renamer.category_palette import DEFAULT_CATEGORY_COLORS, default_category_color
+
+    order = [
+        "Bass", "Drums", "Percussion", "Synth", "Wind",
+        "Keys", "Guitar", "FX", "Strings", "Vocals", "Mallet", "Orchestra",
+    ]
+    cats: list[dict[str, str]] = []
+    for name in order:
+        cats.append({
+            "name": name,
+            "affix": f"{name.upper()} - ",
+            "keywords": "",  # empty — user fills via samplepack chips
+            "color": DEFAULT_CATEGORY_COLORS.get(name, default_category_color(name)),
+        })
+    return OpRule(
+        op="categoryBundle",
+        params={
+            "source": DEFAULT_CATEGORY_SOURCE,
+            "categories": cats,
+        },
+    )
+
+
+def make_samplepack_rules() -> list[Rule]:
+    """Samplepack template — same structure as Default but with empty category keywords."""
+    return [
+        OpRule(op="stripLeadingNumberPrefix"),
+        OpRule(op="stripLeadingDashes"),
+        OpRule(op="collapseWhitespace"),
+        OpRule(op="trim"),
+        make_samplepack_category_bundle(),
+    ]
+
+
 def make_demo_tracks() -> list[Track]:
     """Sample filenames matching the original screenshot preview."""
     demo_names = [

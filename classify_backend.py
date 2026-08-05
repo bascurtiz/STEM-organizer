@@ -49,8 +49,10 @@ _ML_INITIALIZED = False
 AUDIO_EXTS = ('.wav', '.mp3', '.flac', '.aif', '.aiff', '.ogg', '.m4a', '.opus')
 
 MODELS = {
-    # Phase 3 ONNX: only base htdemucs is converted. ft/6s dropped from UI.
-    'htdemucs (good)': 'htdemucs',
+    # Analysis-first separators + CUDA HTDemucs (AGENTS.md / CUDA ship path).
+    # Keys = Model dropdown display labels; values = internal ids (unchanged).
+    'Vocal CNN6': 'vocal_cnn6',
+    'HTdemucs (demucs)': 'htdemucs',
 }
 
 STEM_MODES = {
@@ -64,6 +66,11 @@ STEM_MODES = {
         'mapping':    {n: n for n in ('bass', 'drums', 'other', 'vocals')},
         'fallback':   'other',
     },
+    '6 (b/d/o/v+guitar/piano)': {
+        'categories': ('bass', 'drums', 'other', 'vocals', 'guitar', 'piano'),
+        'mapping':    {n: n for n in ('bass', 'drums', 'other', 'vocals', 'guitar', 'piano')},
+        'fallback':   'other',
+    },
 }
 
 # Older settings / UI labels → current STEM_MODES key
@@ -72,6 +79,7 @@ STEM_MODE_ALIASES = {
     '4-way (bass/drums/other/vocals)': '4 (bass/drums/other/vocals)',
     '4-way (drums/bass/other/vocals)': '4 (bass/drums/other/vocals)',
     'Vocals + Instrumental': '2 (instrumental/vocals)',
+    '6 (bass/drums/other/vocals/guitar/piano)': '6 (b/d/o/v+guitar/piano)',
 }
 
 
@@ -104,6 +112,8 @@ SDR_DEFAULT_THRESHOLDS = {
     'other': 20,
     'vocals': 30,
     'instrumental': 30,
+    'guitar': 20,
+    'piano': 20,
 }
 
 SCAN_MODES = {
@@ -183,34 +193,88 @@ def _init_ml() -> None:
 
 
 def _onnx_demucs_wanted() -> bool:
-    from demucs_onnx import resolve_htdemucs_onnx, stem_onnx_enabled
+    """True when any ONNX stem-separation weight is present."""
+    try:
+        from vocal_classifier_onnx import vocal_classifier_installed
 
-    return stem_onnx_enabled() and resolve_htdemucs_onnx() is not None
+        if vocal_classifier_installed():
+            return True
+    except Exception:
+        pass
+    try:
+        from demucs_onnx import resolve_htdemucs_onnx
+
+        return resolve_htdemucs_onnx() is not None
+    except Exception:
+        return False
 
 
-def load_demucs_model(model_id: str):
-    """Load Demucs — ONNX htdemucs by default; torch fallback when STEM_ONNX=0."""
-    from demucs_onnx import DemucsOnnxModel, resolve_htdemucs_onnx, stem_onnx_enabled
+def load_demucs_model(model_id: str, *, prefer_gpu: bool = False):
+    """Load stem separator — Vocal CNN6 or HTDemucs.
 
-    if stem_onnx_enabled():
+    Legacy ids (umxl/xumxl/scnet_tran/bsroformer/demucs) map to HTDemucs; the
+    UMX-L / X-UMXL / SCNet Tran / BS-RoFormer separators were retired (not
+    faster than HTDemucs on the 3060-class target).
+    prefer_gpu: CUDA EP when usable, else DirectML if present, else CPU.
+    HTDemucs is CUDA-or-CPU only (DirectML historically rejected for Demucs).
+    Vocal CNN6 is a classifier (not separator) — produces synthetic stems for
+    RMS classification; SI-SDR should use HTDemucs or similar.
+    """
+    mid = (model_id or "htdemucs").strip().lower()
+    # Legacy/retired separator ids → HTDemucs.
+    if mid in ("umxl", "xumxl", "scnet_tran", "scnet", "scnet-tran",
+               "bsroformer", "demucs", ""):
+        mid = "htdemucs"
+
+    if mid == "htdemucs":
+        from demucs_onnx import DemucsOnnxModel, resolve_htdemucs_onnx
+
         onnx_path = resolve_htdemucs_onnx()
-        if onnx_path is not None and model_id == "htdemucs":
-            return DemucsOnnxModel(onnx_path, prefer_gpu=False)
-        if onnx_path is not None and model_id != "htdemucs":
+        if onnx_path is None:
             raise RuntimeError(
-                f"ONNX Demucs only supports 'htdemucs' (got {model_id!r}). "
-                "Set STEM_ONNX=0 for torch models, or pick htdemucs."
+                "HTDemucs ONNX weight missing. Place models/htdemucs.onnx "
+                "(or htdemucs.batch.onnx) from StemSplitio/htdemucs-onnx."
             )
-    if get_model is None:
-        raise RuntimeError(
-            "Demucs ONNX weight missing and torch Demucs is not loaded. "
-            "Place models/htdemucs.onnx beside the app, or install torch/demucs."
-        )
-    return get_model(model_id)
+        return DemucsOnnxModel(onnx_path, prefer_gpu=bool(prefer_gpu))
+
+    if mid == "vocal_cnn6":
+        from vocal_classifier_onnx import VocalClassifierOnnxModel, resolve_vocal_classifier_onnx
+
+        onnx_path = resolve_vocal_classifier_onnx()
+        if onnx_path is None:
+            raise RuntimeError(
+                "Vocal CNN6 ONNX weight missing. Place models/vocal_classifier.onnx "
+                "beside the app."
+            )
+        return VocalClassifierOnnxModel(onnx_path, prefer_gpu=bool(prefer_gpu))
+
+    raise RuntimeError(
+        f"Unknown model id {model_id!r} "
+        "(expected 'vocal_cnn6' or 'htdemucs')."
+    )
 
 
 def _is_onnx_model(model) -> bool:
     return getattr(model, "backend", None) == "onnx"
+
+
+def _is_gpu_oom(exc: BaseException) -> bool:
+    """True for torch CUDA OOM or ORT CUDA allocation failures."""
+    if torch is not None and hasattr(torch, "cuda") and isinstance(exc, torch.cuda.OutOfMemoryError):
+        return True
+    msg = str(exc).lower()
+    return any(
+        s in msg
+        for s in (
+            "out of memory",
+            "oom",
+            "failed to allocate",
+            "cudamalloc",
+            "cuda error: out of memory",
+            "resource exhausted",
+            "memory allocation failure",
+        )
+    )
 
 
 def _release_gpu(model, device: str) -> None:
@@ -227,10 +291,30 @@ def _release_gpu(model, device: str) -> None:
         pass
 
 
-def _demucs_apply(model, mix_np: "np.ndarray", device: str, *, overlap: float = 0.25):
+# Classify OLA fraction (chunk hop = segment * (1 - overlap)). Analysis-first
+# default 0.1; override with STEM_CLASSIFY_OVERLAP (float, clamped 0.0–0.5).
+DEFAULT_CLASSIFY_OVERLAP = 0.1
+
+
+def _classify_overlap() -> float:
+    raw = os.environ.get("STEM_CLASSIFY_OVERLAP", "").strip()
+    if not raw:
+        return DEFAULT_CLASSIFY_OVERLAP
+    try:
+        v = float(raw)
+    except ValueError:
+        return DEFAULT_CLASSIFY_OVERLAP
+    return max(0.0, min(0.5, v))
+
+
+def _demucs_apply(model, mix_np: "np.ndarray", device: str, *, overlap: float | None = None):
     """Run separation. mix_np: (B,2,T) float32 → (B,S,2,T) float32."""
+    if overlap is None:
+        overlap = _classify_overlap()
     if _is_onnx_model(model):
-        model.to("cpu" if device == "cpu" else "cuda")
+        want = "cpu" if device == "cpu" else (device or "dml")
+        if getattr(model, "_device", None) != want:
+            model.to(want)
         return model.separate_numpy(mix_np, overlap=overlap)
     batch = torch.from_numpy(mix_np).to(device)
     with torch.no_grad():
@@ -350,49 +434,39 @@ def cuda_incompatibility_hint() -> str | None:
 
 
 def resolve_processing_device(use_cuda: bool) -> tuple[str, list[str]]:
-    """Return device id for Demucs.
+    """Return device id for the stem separator.
 
-    ONNX path: 'cuda' (CUDA EP + real NVIDIA GPU) or 'cpu'.
-    DirectML is not used for Demucs (~31 GB VRAM on RTX 5090).
-    Torch path: 'cuda' or 'cpu'.
+    Prefer ``cuda`` when a real NVIDIA GPU + CUDA EP are usable, else ``dml``
+    when DirectML is exposed, else ``cpu``. ``use_cuda`` is the UI "Use GPU"
+    flag (name is historical).
     """
     warnings: list[str] = []
-    if _onnx_demucs_wanted():
-        if not use_cuda:
-            return 'cpu', warnings
-        try:
-            from ort_util import cuda_ep_usable, nvidia_gpu_present
-            import onnxruntime as ort
-
-            if "CUDAExecutionProvider" not in ort.get_available_providers():
-                warnings.append(
-                    "ONNX CUDAExecutionProvider not in this build — using CPU. "
-                    "Install onnxruntime-gpu (+ nvidia-cudnn-cu12) for Demucs GPU."
-                )
-                return 'cpu', warnings
-            if not nvidia_gpu_present():
-                warnings.append(
-                    "No NVIDIA GPU detected — using CPU "
-                    "(onnxruntime-gpu still lists CUDA EP on GPU-less VMs)."
-                )
-                return 'cpu', warnings
-            if not cuda_ep_usable():
-                warnings.append("CUDA EP not usable — using CPU.")
-                return 'cpu', warnings
-        except Exception:
-            warnings.append("CUDA probe failed — using CPU.")
-            return 'cpu', warnings
-        return 'cuda', warnings
     if not use_cuda:
         return 'cpu', warnings
-    if torch is None or not torch.cuda.is_available():
-        warnings.append('CUDA not available, using CPU.')
+    try:
+        import onnxruntime as ort
+
+        available = set(ort.get_available_providers())
+    except Exception:
+        warnings.append("onnxruntime unavailable — using CPU.")
         return 'cpu', warnings
-    if not cuda_usable():
-        hint = cuda_incompatibility_hint()
-        warnings.append(hint or 'CUDA not usable on this GPU, using CPU.')
-        return 'cpu', warnings
-    return 'cuda', warnings
+
+    if "CUDAExecutionProvider" in available:
+        try:
+            from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+            if nvidia_gpu_present() and cuda_ep_usable():
+                return 'cuda', warnings
+            if not nvidia_gpu_present():
+                warnings.append("No NVIDIA GPU — trying DirectML/CPU.")
+        except Exception:
+            warnings.append("CUDA probe failed — trying DirectML/CPU.")
+
+    if "DmlExecutionProvider" in available:
+        return 'dml', warnings
+
+    warnings.append("No CUDA/DirectML EP in this ORT build — using CPU.")
+    return 'cpu', warnings
 
 
 def is_cuda_kernel_error(exc: BaseException) -> bool:
@@ -476,9 +550,25 @@ SDR_PHASE_LABELS = {
     'model_load': 'Model load',
     'target_scan': 'Target scan',
     'audio_load': 'Load audio',
-    'separation': 'Separation (Demucs)',
+    'separation': 'Separation',  # filled with active model via sdr_phase_labels()
     'sdr_compute': 'SDR computation',
 }
+
+
+def model_display_label(model_id: str | None) -> str:
+    """Dropdown-facing label for an internal model id (e.g. htdemucs → HTdemucs)."""
+    mid = (model_id or '').strip().lower()
+    for label, mid_v in MODELS.items():
+        if mid_v == mid:
+            return label
+    return mid or 'unknown'
+
+
+def sdr_phase_labels(model_id: str | None = None) -> dict[str, str]:
+    """SI-SDR phase labels with Separation (Model) matching the Model dropdown."""
+    labels = dict(SDR_PHASE_LABELS)
+    labels['separation'] = f'Separation ({model_display_label(model_id)})'
+    return labels
 
 
 def folder_name_with_duration(name: str, duration_sec: float | None, append: bool) -> str:
@@ -970,78 +1060,118 @@ def prescan_stems(paths):
     return issues, ok
 
 
+def _load_classify_chunk(file_paths, sr: int):
+    """Load a classify batch chunk. Returns (audios, lengths, valid, errors).
+
+    errors: list of (path, err_str).
+    """
+    audios, lengths, valid = [], [], []
+    errors = []
+    for fp in file_paths:
+        try:
+            a = load_audio(str(fp), sr=sr)
+        except Exception as e:
+            errors.append((fp, f'load failed: {format_load_error(e)}'))
+            continue
+        n_samples = int(a.shape[-1])
+        if n_samples == 0:
+            errors.append((fp, 'empty audio (0 samples)'))
+            continue
+        audios.append(a)
+        lengths.append(n_samples)
+        valid.append(fp)
+    return audios, lengths, valid, errors
+
+
 def classify_batch(model, file_paths, device: str, batch_size: int = 4, stop_event=None):
+    from concurrent.futures import ThreadPoolExecutor
+
     sr = model.samplerate
     sources = list(model.sources)
     onnx = _is_onnx_model(model)
-    for start in range(0, len(file_paths), batch_size):
-        if stop_event and stop_event.is_set():
-            if not onnx and device == 'cuda':
-                model.cpu()
-                torch.cuda.empty_cache()
-            return
-        chunk = file_paths[start:start + batch_size]
-        audios, lengths, valid = [], [], []
-        for fp in chunk:
-            try:
-                a = load_audio(str(fp), sr=sr)
-            except Exception as e:
-                yield (fp, None, f'load failed: {format_load_error(e)}')
-                continue
-            n_samples = int(a.shape[-1])
-            if n_samples == 0:
-                yield (fp, None, 'empty audio (0 samples)')
-                continue
-            audios.append(a)
-            lengths.append(n_samples)
-            valid.append(fp)
-        if not audios:
-            continue
-        max_len = max(lengths)
-        batch = np.zeros((len(audios), 2, max_len), dtype=np.float32)
-        for i, a in enumerate(audios):
-            batch[i, :, :lengths[i]] = a
-        try:
-            out_np = _demucs_apply(model, batch, device, overlap=0.25)
-        except Exception as e:
-            if not onnx and device == 'cuda' and isinstance(e, torch.cuda.OutOfMemoryError):
-                torch.cuda.empty_cache()
-                if len(valid) == 1:
-                    yield (valid[0], None, 'cuda OOM')
-                    continue
-                for fp in valid:
-                    yield from classify_batch(model, [fp], device, batch_size=1)
-                continue
-            if (
-                not onnx
-                and device == 'cuda'
-                and isinstance(e, RuntimeError)
-                and is_cuda_kernel_error(e)
-            ):
-                torch.cuda.empty_cache()
-                for fp in valid:
-                    yield (
-                        fp,
-                        None,
-                        'CUDA kernels incompatible with this GPU (use cu128 for RTX 50-series)',
-                    )
-                continue
-            if isinstance(e, AssertionError):
-                if len(valid) == 1:
-                    yield (valid[0], None, 'audio too short for model')
-                    continue
-                for fp in valid:
-                    yield from classify_batch(model, [fp], device, batch_size=1)
-                continue
-            for fp in valid:
-                yield (fp, None, str(e))
-            continue
+    effective_bs = max(1, int(batch_size))
+    if onnx:
+        from demucs_onnx import demucs_max_batch
 
-        for i, fp in enumerate(valid):
-            energies = {n: _rms(out_np[i, j, :, :lengths[i]]) for j, n in enumerate(sources)}
-            yield (fp, energies, None)
-        if not onnx and device == 'cuda':
-            torch.cuda.empty_cache()
+        effective_bs = max(1, min(effective_bs, demucs_max_batch()))
+        # BS-RoFormer is not zero-pad invariant and runs STFT outside the graph:
+        # stacking unequal stems to max_len wastes work and corrupts tails. Always
+        # one file per forward (OLA still packs multiple time-offsets internally).
+        if getattr(model, "sources", None) is not None and "guitar" in list(model.sources):
+            effective_bs = 1
+
+    starts = list(range(0, len(file_paths), effective_bs))
+    # Prefetch next decode while Demucs runs (no quality change; overlaps I/O with GPU).
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        next_fut = None
+        for i, start in enumerate(starts):
+            if stop_event and stop_event.is_set():
+                if not onnx and device == 'cuda':
+                    model.cpu()
+                    torch.cuda.empty_cache()
+                return
+            chunk = file_paths[start:start + effective_bs]
+            if next_fut is not None:
+                audios, lengths, valid, errors = next_fut.result()
+                next_fut = None
+            else:
+                audios, lengths, valid, errors = _load_classify_chunk(chunk, sr)
+            for fp, err in errors:
+                yield (fp, None, err)
+            if i + 1 < len(starts) and not (stop_event and stop_event.is_set()):
+                next_chunk = file_paths[starts[i + 1]:starts[i + 1] + effective_bs]
+                next_fut = pool.submit(_load_classify_chunk, next_chunk, sr)
+            if not audios:
+                continue
+            max_len = max(lengths)
+            batch = np.zeros((len(audios), 2, max_len), dtype=np.float32)
+            for j, a in enumerate(audios):
+                batch[j, :, :lengths[j]] = a
+            try:
+                out_np = _demucs_apply(model, batch, device)
+            except Exception as e:
+                if device == 'cuda' and _is_gpu_oom(e):
+                    if not onnx and torch is not None:
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    if len(valid) == 1:
+                        yield (valid[0], None, 'cuda OOM')
+                        continue
+                    for fp in valid:
+                        yield from classify_batch(model, [fp], device, batch_size=1)
+                    continue
+                if (
+                    not onnx
+                    and device == 'cuda'
+                    and isinstance(e, RuntimeError)
+                    and is_cuda_kernel_error(e)
+                ):
+                    torch.cuda.empty_cache()
+                    for fp in valid:
+                        yield (
+                            fp,
+                            None,
+                            'CUDA kernels incompatible with this GPU (use cu128 for RTX 50-series)',
+                        )
+                    continue
+                if isinstance(e, AssertionError):
+                    if len(valid) == 1:
+                        yield (valid[0], None, 'audio too short for model')
+                        continue
+                    for fp in valid:
+                        yield from classify_batch(model, [fp], device, batch_size=1)
+                    continue
+                for fp in valid:
+                    yield (fp, None, str(e))
+                continue
+
+            for j, fp in enumerate(valid):
+                energies = {n: _rms(out_np[j, k, :, :lengths[j]]) for k, n in enumerate(sources)}
+                yield (fp, energies, None)
+            if not onnx and device == 'cuda':
+                torch.cuda.empty_cache()
 
 
 def classify_to_category(energies: dict, mode_cfg: dict, threshold: float, min_margin: float):
@@ -1449,6 +1579,35 @@ def build_single_stem_folder_hint(root: Path, scan_mode: str, category: str):
     }
 
 
+def collect_sdr_process_all_preflight(
+    root: Path,
+    scan_mode: str,
+    preferred_categories: tuple[str, ...],
+) -> dict:
+    """Filesystem-only SI-SDR process-all preflight (safe off the GUI thread).
+
+    Walks the output tree to detect layout and gather prompt payloads. Does not
+    mutate params or show dialogs — the UI applies those on the main thread.
+    """
+    _cats, layout = resolve_sdr_layout_and_categories(root, scan_mode, preferred_categories)
+    pair_hint = None
+    if set(preferred_categories) == {'instrumental', 'vocals'}:
+        pair_hint = build_pair_folder_process_all_hint(root, scan_mode)
+        if pair_hint and not pair_hint.get('should_ask_process_all'):
+            pair_hint = None
+    flat_hints: list[dict] = []
+    if layout in (SDR_LAYOUT_SINGLE_FLAT, SDR_LAYOUT_MIXED_FLAT, None):
+        for kind in ('instrumental', 'vocals'):
+            hint = build_single_stem_folder_hint(root, scan_mode, kind)
+            if hint and hint.get('should_ask_process_all'):
+                flat_hints.append(hint)
+    return {
+        'layout': layout,
+        'pair_hint': pair_hint,
+        'flat_hints': flat_hints,
+    }
+
+
 def single_stem_process_all_message(hint: dict) -> str:
     kind = str(hint['kind'])
     return (
@@ -1541,9 +1700,12 @@ _SDR_CATEGORY_ALTERNATES: dict[tuple[str, ...], tuple[str, ...]] = {
     STEM_MODES['4 (bass/drums/other/vocals)']['categories']: (
         STEM_MODES['2 (instrumental/vocals)']['categories']
     ),
+    STEM_MODES['6 (b/d/o/v+guitar/piano)']['categories']: (
+        STEM_MODES['4 (bass/drums/other/vocals)']['categories']
+    ),
 }
 
-_ALL_SDR_CATEGORIES = ('bass', 'drums', 'other', 'vocals', 'instrumental')
+_ALL_SDR_CATEGORIES = ('bass', 'drums', 'other', 'vocals', 'instrumental', 'guitar', 'piano')
 
 
 def resolve_sdr_layout_and_categories(root: Path, scan_mode: str, preferred_categories: tuple[str, ...]):
@@ -1586,6 +1748,7 @@ def describe_sdr_scan_failure(root: Path, scan_mode: str, preferred_categories: 
     for label, cats in (
         ('2-stem (instrumental + vocals)', STEM_MODES['2 (instrumental/vocals)']['categories']),
         ('4-stem (bass/drums/other/vocals)', STEM_MODES['4 (bass/drums/other/vocals)']['categories']),
+        ('6-stem (bass/drums/other/vocals/guitar/piano)', STEM_MODES['6 (b/d/o/v+guitar/piano)']['categories']),
     ):
         n = sum(1 for f in folders if folder_has_all_stems(f, cats))
         if n:
@@ -1785,9 +1948,11 @@ def model_estimate_for_category(out_np, sources, category, mixture=None):
             vocals = out_np[sources.index('vocals')]
             n = min(mixture.shape[1], vocals.shape[1])
             return mixture[:, :n] - vocals[:, :n]
-        parts = [out_np[sources.index(s)] for s in ('drums', 'bass', 'other') if s in sources]
+        # Sum all non-vocal sources (handles 4-stem drums/bass/other and 6-stem
+        # +guitar/+piano uniformly — never assumes a fixed source list).
+        parts = [out_np[sources.index(s)] for s in sources if s != 'vocals']
         if not parts:
-            raise ValueError('instrumental: no drum/bass/other sources in model')
+            raise ValueError('instrumental: no non-vocal sources in model')
         est = np.zeros_like(parts[0])
         for p in parts:
             est += p
@@ -1801,10 +1966,55 @@ def separate_mixture(model, mixture, device: str):
     mean = float(ref.mean())
     std = float(ref.std()) + 1e-8
     normalized = (mix - mean) / std
-    out_np = _demucs_apply(
-        model, normalized[np.newaxis], device, overlap=0.25,
-    )
+    out_np = _demucs_apply(model, normalized[np.newaxis], device)
     return out_np[0] * std + mean
+
+
+def separate_mixtures_batch(model, mixtures: list, device: str) -> list:
+    """Per-stem mean/std normalize, one batched Demucs apply, denormalize.
+
+    mixtures: list of (2, T) arrays (may differ in T — padded internally).
+    Returns list of (S, 2, T_i) arrays matching each input length.
+    On GPU OOM with B>1, falls back to per-stem separate_mixture.
+    """
+    if not mixtures:
+        return []
+    if len(mixtures) == 1:
+        return [separate_mixture(model, mixtures[0], device)]
+
+    norms: list[tuple[float, float]] = []
+    arrays: list = []
+    lengths: list[int] = []
+    for mixture in mixtures:
+        mix = mixture.astype(np.float32)
+        ref = mix.mean(axis=0)
+        mean = float(ref.mean())
+        std = float(ref.std()) + 1e-8
+        norms.append((mean, std))
+        arrays.append((mix - mean) / std)
+        lengths.append(int(mix.shape[1]))
+
+    max_len = max(lengths)
+    batch = np.zeros((len(arrays), 2, max_len), dtype=np.float32)
+    for i, a in enumerate(arrays):
+        batch[i, :, : lengths[i]] = a
+
+    try:
+        out_np = _demucs_apply(model, batch, device)
+    except Exception as e:
+        if device == "cuda" and _is_gpu_oom(e) and len(mixtures) > 1:
+            if torch is not None:
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            return [separate_mixture(model, m, device) for m in mixtures]
+        raise
+
+    results = []
+    for i, (mean, std) in enumerate(norms):
+        results.append(out_np[i, :, :, : lengths[i]] * std + mean)
+    return results
 
 
 def _play_done_sound() -> None:
@@ -2220,6 +2430,8 @@ class Worker(threading.Thread):
         self._phase_timer = PhaseTimer()
         try:
             p = self.p
+            # Log before CUDA probe / weight load so the UI isn't blank.
+            self.log(f"  Preparing '{p['model_id']}' …")
             device, device_warnings = resolve_processing_device(bool(p['use_cuda']))
             for warning in device_warnings:
                 self.log(f'  [warn] {warning}')
@@ -2230,16 +2442,29 @@ class Worker(threading.Thread):
                 from ffmpeg_bootstrap import ffmpeg_missing_message
                 self.log(f'  [warn] {ffmpeg_missing_message()}')
             self.log(f"  Device: {device}")
-            from demucs_onnx import resolve_htdemucs_onnx, stem_onnx_enabled
-            from deps_bootstrap import demucs_models_present
+            from deps_bootstrap import demucs_model_cached
 
-            if stem_onnx_enabled() and resolve_htdemucs_onnx() is not None:
-                pass  # models/htdemucs.onnx already on disk
-            elif not demucs_models_present():
-                self.log('  Downloading Demucs model weights (~450 MB)...')
+            if not demucs_model_cached(p['model_id']):
+                mid = str(p.get('model_id') or '')
+                if mid == 'vocal_cnn6':
+                    self.log(
+                        '  [warn] Vocal CNN6 ONNX weight missing (~24 MB). '
+                        "Re-run the installer's models component, or place "
+                        'models/vocal_classifier.onnx beside the app.'
+                    )
+                else:
+                    self.log(
+                        '  [warn] HTDemucs ONNX weight missing (~302 MB). '
+                        "Re-run the installer's models component, or place "
+                        'models/htdemucs.onnx beside the app.'
+                    )
             self.log(f"  Loading model '{p['model_id']}' ...")
             t0 = time.monotonic()
-            model = load_demucs_model(p['model_id']).eval().to(device)
+            model = load_demucs_model(
+                p['model_id'], prefer_gpu=(device != 'cpu')
+            ).eval().to(device)
+            # Yield GIL so queued "Loading…" logs / Qt UI can breathe.
+            time.sleep(0)
             model_load_dt = time.monotonic() - t0
             self._phase_timer.add('model_load', model_load_dt)
             backend = getattr(model, 'backend', 'torch')
@@ -2410,7 +2635,9 @@ class SdrWorker(threading.Thread):
             self.log(f'  Deleted (stem file): {len(stems)}')
             for name in stems:
                 self.log(f'    {name}')
-        self._phase_timer.log_summary(self.log, SDR_PHASE_LABELS)
+        self._phase_timer.log_summary(
+            self.log, sdr_phase_labels(self.p.get('model_id')),
+        )
         self.log('')
         self.log('DONE')
 
@@ -2466,34 +2693,31 @@ class SdrWorker(threading.Thread):
         scores: dict[str, float] = {}
         sep_dt = 0.0
         sdr_dt = 0.0
-        for cat in sdr_process_order(categories):
-            ref = audios[cat][:, :cut]
-            t0 = time.monotonic()
-            try:
-                out_np = separate_mixture(model, ref, device)
-            except Exception as e:
-                is_oom = (
-                    torch is not None
-                    and hasattr(torch, "cuda")
-                    and isinstance(e, torch.cuda.OutOfMemoryError)
-                )
-                if is_oom:
+        order = list(sdr_process_order(categories))
+        refs = [audios[cat][:, :cut] for cat in order]
+        t0 = time.monotonic()
+        try:
+            outs = separate_mixtures_batch(model, refs, device)
+        except Exception as e:
+            if device == 'cuda' and _is_gpu_oom(e):
+                if torch is not None:
                     try:
                         torch.cuda.empty_cache()
                     except Exception:
                         pass
-                    self.log(f'  [error] {cat}: cuda OOM during separation')
-                    self._stats['skipped_incomplete'] += 1
-                    return
-                self.log(f'  [error] {cat}: separation failed: {e}')
+                self.log('  [error] cuda OOM during separation')
                 self._stats['skipped_incomplete'] += 1
                 return
-            sep_dt += time.monotonic() - t0
-            if device == 'cuda' and torch is not None:
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
+            self.log(f'  [error] separation failed: {e}')
+            self._stats['skipped_incomplete'] += 1
+            return
+        sep_dt += time.monotonic() - t0
+        if device == 'cuda' and torch is not None:
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        for cat, out_np, ref in zip(order, outs, refs):
             t0 = time.monotonic()
             try:
                 est = model_estimate_for_category(out_np[:, :, :cut], sources, cat, mixture=ref)
@@ -2579,6 +2803,7 @@ class SdrWorker(threading.Thread):
         self._phase_timer = PhaseTimer()
         try:
             p = self.p
+            self.log(f"  Preparing '{p['model_id']}' …")
             device, device_warnings = resolve_processing_device(bool(p['use_cuda']))
             for warning in device_warnings:
                 self.log(f'  [warn] {warning}')
@@ -2589,12 +2814,28 @@ class SdrWorker(threading.Thread):
                 from ffmpeg_bootstrap import ffmpeg_missing_message
                 self.log(f'  [warn] {ffmpeg_missing_message()}')
             self.log(f"  Device: {device}")
-            from deps_bootstrap import demucs_models_present
-            if not demucs_models_present():
-                self.log('  Downloading Demucs model weights (~450 MB)...')
+            from deps_bootstrap import demucs_model_cached
+            if not demucs_model_cached(p['model_id']):
+                mid = str(p.get('model_id') or '')
+                if mid == 'vocal_cnn6':
+                    self.log(
+                        '  [warn] Vocal CNN6 ONNX weight missing (~24 MB). '
+                        "Re-run the installer's models component, or place "
+                        'models/vocal_classifier.onnx beside the app.'
+                    )
+                else:
+                    self.log(
+                        '  [warn] HTDemucs ONNX weight missing (~302 MB). '
+                        "Re-run the installer's models component, or place "
+                        'models/htdemucs.onnx beside the app.'
+                    )
             self.log(f"  Loading model '{p['model_id']}' ...")
             t0 = time.monotonic()
-            model = load_demucs_model(p['model_id']).eval().to(device)
+            model = load_demucs_model(
+                p['model_id'], prefer_gpu=(device != 'cpu')
+            ).eval().to(device)
+            # Yield GIL so queued "Loading…" logs / Qt UI can breathe.
+            time.sleep(0)
             model_load_dt = time.monotonic() - t0
             self._phase_timer.add('model_load', model_load_dt)
             sources = list(model.sources)

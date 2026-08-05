@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 REM =============================================================================
-REM STEM organizer — install optional deps / tools (v1.0.8+)
+REM STEM organizer - install optional deps / tools (v1.0.8+)
 REM
 REM Frozen build (STEM-organizer.exe beside this script):
 REM   - ML stack is already inside the freeze (onnxruntime-gpu + librosa +
@@ -12,11 +12,12 @@ REM     if missing.
 REM
 REM Source / .venv (no STEM-organizer.exe here):
 REM   - Creates/uses .venv and installs pinned deps from requirements.txt
-REM     (onnxruntime-gpu==1.28.0 + NVIDIA CUDA wheels + audio helpers).
+REM     (onnxruntime-gpu==1.28.0 + nvidia CUDA/cuDNN wheels + audio helpers).
 REM   - Then fetches ffmpeg / mp3val / flac.
 REM
-REM Demucs GPU = CUDA EP only. DirectML is not used for HTDemucs.
-REM ONNX model weights are NOT installed here — installer downloads them from
+REM Classify GPU = CUDA EP (NVIDIA). HTDemucs requires CUDA (DirectML bad).
+REM Separators = HTDemucs / Vocal CNN6 ONNX.
+REM ONNX model weights are NOT installed here - installer downloads them from
 REM GitHub (bascurtiz/STEM-organizer-models tag "models"), or place them under
 REM models\ / tagger folders for a local freeze.
 REM =============================================================================
@@ -79,15 +80,15 @@ set "USE_SITE=0"
 if exist "%~dp0STEM-organizer.exe" set "USE_SITE=1"
 
 if "%USE_SITE%"=="1" (
-    echo Mode: frozen EXE present — skipping pip ML install ^(already in freeze^).
+    echo Mode: frozen EXE present - skipping pip ML install ^(already in freeze^).
     echo Will only ensure ffmpeg / mp3val / flac beside the app.
     echo.
     goto tools_section
 )
 
 REM --- Source mode: .venv + requirements.txt ---
-echo Mode: source — install pinned ONNX/CUDA stack into .venv
-echo Runtime: onnxruntime-gpu ^(CUDA EP^) — DirectML not used for Demucs.
+echo Mode: source - install pinned ONNX/DirectML stack into .venv
+echo Runtime: onnxruntime-gpu - Classify GPU = CUDA EP.
 echo.
 if exist "%~dp0.venv\Scripts\python.exe" (
     "%~dp0.venv\Scripts\python.exe" -c "import sys; v='%HOST_VER%'.split('.'); raise SystemExit(0 if sys.version_info[:2]==(int(v[0]),int(v[1])) else 1)" 1>nul 2>nul
@@ -312,8 +313,8 @@ if "%USE_SITE%"=="1" (
     echo Frozen app: tools checked/installed beside the EXE.
     echo Models: downloaded by the installer, or keep existing models\ folders.
 ) else (
-    echo Source .venv: requirements.txt installed ^(onnxruntime-gpu + audio^).
-    echo Demucs GPU needs an NVIDIA driver; AMD/Intel Classify uses CPU.
+    echo Source .venv: requirements.txt installed ^(onnxruntime-gpu + CUDA wheels + audio^).
+    echo Classify GPU uses CUDA EP on NVIDIA ^(onnxruntime-gpu^).
 )
 echo.
 pause

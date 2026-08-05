@@ -67,6 +67,7 @@ from track_renamer.engine.processor import compute_preview_row, prepare_rules
 
 from .. import theme
 from ..widgets.log_panel import LOG_INDENT
+from .category_icon import category_bar_icon
 from .theme import TIPS
 
 
@@ -85,6 +86,10 @@ RESULT_BATCH_SIZE = 64
 RESULT_POLL_MS = 40
 LAZY_BUFFER_ROWS = 60
 FOLDER_HEADER_FONT_PX = 10
+
+# Right gutter for the overlay scrollbar — same 16 px inset the rules panel
+# uses, so the bar floats over empty space instead of the New column's text.
+SCROLLBAR_GUTTER = 16
 
 
 @dataclass(frozen=True)
@@ -586,12 +591,46 @@ class _CategoryBadgeDelegate(QStyledItemDelegate):
             font.setPixelSize(LOG_CHIP_FONT_PX)
         return font
 
+    @staticmethod
+    def _surface_color(option, index) -> QColor:
+        """Row surface color — identical to Fluent's TableItemDelegate paint.
+
+        Odd rows carry the model BackgroundRole (panel); even rows fall back to
+        Fluent's white-alpha-5 alternate fill; selected rows use the highlight
+        palette. This is the exact rule the other columns' delegate uses, so
+        Category cells (empty or badged) are indistinguishable from the row
+        they sit in.
+
+        Queried via ``index.data(Qt.BackgroundRole)`` (not
+        ``option.backgroundBrush``, which the view leaves as NoBrush) — mirroring
+        TableItemDelegate's own background lookup.
+        """
+        if option.state & QStyle.State_Selected:
+            return option.palette.color(option.palette.ColorRole.Highlight)
+        bg = index.data(Qt.BackgroundRole)
+        if isinstance(bg, QColor):
+            return QColor(bg)
+        if hasattr(bg, "color"):  # QBrush
+            return QColor(bg.color())
+        widget = option.widget
+        if index.row() % 2 == 0 and widget is not None:
+            if getattr(widget, "alternatingRowColors", lambda: False)():
+                return QColor(255, 255, 255, 5)
+        return QColor(0, 0, 0, 0)
+
     def paint(self, painter: QPainter, option, index) -> None:  # noqa: N802
         model = index.model()
         if model is not None and getattr(model, "is_folder_header", lambda _r: False)(index.row()):
             return
         label = (index.data(Qt.DisplayRole) or "").strip()
         if not label:
+            # Paint the row surface so an unchanged row's Category cell blends
+            # with the rest of the row. Returning early left the cell unpainted
+            # and the app background (#1e1f26) showed through as a dark
+            # "badge" hole — this delegate replaces Fluent's per-cell row fill.
+            painter.save()
+            painter.fillRect(option.rect, self._surface_color(option, index))
+            painter.restore()
             return
         color_hex = ""
         if hasattr(model, "_category_colors"):
@@ -611,11 +650,11 @@ class _CategoryBadgeDelegate(QStyledItemDelegate):
         pix = self._chips.category_pixmap(chip_text, color_hex)
         cell = option.rect
         # Erase default cell text (DisplayRole) before drawing the chip pixmap.
-        bg = option.backgroundBrush.color() if option.backgroundBrush.style() != Qt.NoBrush else QColor(
-            theme.COLORS["panel"] if index.row() % 2 else theme.COLORS["panel2"]
-        )
-        if option.state & QStyle.State_Selected:
-            bg = option.palette.color(option.palette.ColorRole.Highlight)
+        # Fill with the row surface (selected → highlight, odd → panel, even →
+        # Fluent alternate fill) so the badge floats directly on the row — the
+        # old panel2/panel cell fill left a visible frame around the chip on
+        # even rows (read as an outline when zoomed).
+        bg = self._surface_color(option, index)
         avail = cell.adjusted(
             self._BADGE_INSET_H,
             self._BADGE_INSET_V,
@@ -777,12 +816,18 @@ class PreviewPanel(QWidget):
         hdr.setSectionResizeMode(COL_CATEGORY, QHeaderView.Interactive)
         hdr.setSectionResizeMode(COL_KEYWORD, QHeaderView.Interactive)
         hdr.setSectionResizeMode(COL_ORIGINAL, QHeaderView.Interactive)
-        hdr.setSectionResizeMode(COL_NEW, QHeaderView.Stretch)
+        # New is managed (not Stretch) so it can end SCROLLBAR_GUTTER px short
+        # of the viewport edge, leaving the overlay scrollbar a clear gutter.
+        hdr.setSectionResizeMode(COL_NEW, QHeaderView.Interactive)
         hdr.setStretchLastSection(False)
         hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         hdr.setSortIndicatorShown(False)
         hdr.sectionClicked.connect(self._on_header_clicked)
         hdr.sectionDoubleClicked.connect(self._on_header_double_clicked)
+        # Any other section resize (fit / balance / user drag) re-clamps New so
+        # the total never overflows and the gutter always holds (a deliberate
+        # drag of the New column itself is respected).
+        hdr.sectionResized.connect(self._on_section_resized)
         self.table.verticalHeader().setDefaultSectionSize(26)
         # Category cell → log-style chip fill (inset so row lines show)
         self.table.setItemDelegateForColumn(COL_CATEGORY, _CategoryBadgeDelegate(self.table))
@@ -921,10 +966,45 @@ class PreviewPanel(QWidget):
         if not self._name_cols_balanced:
             self._balance_filename_columns()
 
+    def _apply_right_gutter(self) -> None:
+        """Clamp the New column so it ends SCROLLBAR_GUTTER px short of the edge.
+
+        The Fluent overlay scrollbar floats over the viewport's rightmost 13 px
+        with no reserved width, so with a Stretch last column long New names
+        elide right under the bar. New is Interactive and sized to
+        viewport − (other columns) − SCROLLBAR_GUTTER, giving the bar the same
+        clear gutter the rules panel has. Never overflows: on very narrow
+        viewports the gutter is dropped rather than forcing overflow.
+        """
+        try:
+            hdr = self.table.horizontalHeader()
+            vw = self.table.viewport().width()
+        except RuntimeError:
+            return
+        if vw < 80:
+            return
+        fixed = sum(hdr.sectionSize(i) for i in range(COL_NEW))
+        avail = vw - fixed
+        # Keep the gutter whenever the New column can stay at the table's
+        # minimum section width; only below that (extreme narrow) fill to the
+        # edge rather than force horizontal overflow.
+        min_w = hdr.minimumSectionSize()
+        target = avail - SCROLLBAR_GUTTER if avail - SCROLLBAR_GUTTER >= min_w else avail
+        if hdr.sectionSize(COL_NEW) != target:
+            hdr.resizeSection(COL_NEW, target)
+
+    def _on_section_resized(self, logical_index: int, old_size: int, new_size: int) -> None:
+        """Re-clamp New after any other column changes; respect New drags."""
+        if logical_index == COL_NEW:
+            return
+        self._apply_right_gutter()
+
     def _balance_filename_columns(self) -> None:
-        """Give Original ~half of space after ✓+Category+Keyword; New Stretch takes the rest.
+        """Give Original ~half of space after ✓+Category+Keyword; New takes the rest.
 
         Runs once so user drag-resizes are not overwritten on later data updates.
+        (New is clamped to keep the scrollbar gutter by _apply_right_gutter,
+        which runs off the sectionResized hook whenever Original changes.)
         """
         if self._name_cols_balanced:
             return
@@ -941,7 +1021,7 @@ class PreviewPanel(QWidget):
             + hdr.sectionSize(COL_KEYWORD)
         )
         remaining = max(0, vw - fixed)
-        # Half for Original; Stretch New fills the other half (and any slack).
+        # Half for Original; New fills the other half (minus the scrollbar gutter).
         orig = max(160, remaining // 2)
         hdr.resizeSection(COL_ORIGINAL, orig)
         self._name_cols_balanced = True
@@ -966,6 +1046,32 @@ class PreviewPanel(QWidget):
         self.table.clearSelection()
         if self.on_active:
             self.on_active(None, None)
+
+    def select_track_by_index(self, track_idx: int) -> bool:
+        """Select + scroll to the preview row for *track_idx* and make it active.
+
+        Returns True when the track exists and its row is present in the view.
+        Used by the samplepack chips' right-click "find" action: jump to the
+        first preview file that carries the clicked label.
+
+        A row hidden by the "Only changed" filter is revealed first so the
+        jump is actually visible (the filter re-applies on the next data
+        pass). The table also takes focus so arrow keys navigate from the
+        found row immediately.
+        """
+        if not (0 <= track_idx < len(self._tracks)):
+            return False
+        display = self.model.display_row_for_track(track_idx)
+        if display is None:
+            return False
+        if self.table.isRowHidden(display):
+            self.table.setRowHidden(display, False)
+        self._set_active_display(display)
+        self.table.scrollTo(
+            self.model.index(display, 0), QAbstractItemView.PositionAtCenter
+        )
+        self.table.setFocus(Qt.ShortcutFocusReason)
+        return True
 
     def cancel_preview_work(self) -> None:
         if self._job is not None:
@@ -1278,6 +1384,8 @@ class PreviewPanel(QWidget):
             # First real width may arrive after the post-build singleShot.
             if not self._name_cols_balanced:
                 self._balance_filename_columns()
+            # Keep the scrollbar gutter when the panel width changes.
+            self._apply_right_gutter()
         return super().eventFilter(obj, event)
 
     def _on_header_clicked(self, logical_index: int) -> None:
@@ -1303,7 +1411,21 @@ class PreviewPanel(QWidget):
             return
         hdr = self.table.horizontalHeader()
         hint = hdr.sectionSizeFromContents(logical_index).width()
-        hdr.resizeSection(logical_index, max(48, min(hint + 12, 720)))
+        width = max(48, min(hint + 12, 720))
+        if logical_index == COL_NEW:
+            # The gutter hook skips New on purpose (respects drags), so clamp
+            # the auto-fit here: New must still end short of the viewport edge.
+            try:
+                vw = self.table.viewport().width()
+            except RuntimeError:
+                vw = 0
+            if vw > 0:
+                fixed = sum(hdr.sectionSize(i) for i in range(COL_NEW))
+                avail = vw - fixed
+                width = max(48, min(width, avail - SCROLLBAR_GUTTER))
+                if avail - SCROLLBAR_GUTTER < 48:
+                    width = avail
+        hdr.resizeSection(logical_index, width)
 
     def _on_table_clicked(self, index) -> None:
         if not index.isValid():
@@ -1395,6 +1517,8 @@ class PreviewPanel(QWidget):
             if not label:
                 continue
             action = Action(label, self)
+            # Vertical-bar icon in the category color — matches the chip dash.
+            action.setIcon(category_bar_icon(self._category_color(cat.name)))
             action.triggered.connect(
                 lambda checked=False, c=cat: self._override_selected_category(c)
             )

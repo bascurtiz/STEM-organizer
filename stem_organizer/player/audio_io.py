@@ -23,14 +23,18 @@ def ensure_player_audio_deps() -> None:
     global _np, _sf, _ffmpeg, _audio_deps_ready
     if _audio_deps_ready:
         return
-    from ffmpeg_bootstrap import ffmpeg_path  # noqa: F401
+    # Resolve a real ffmpeg (PATH scan skips the crippled Microsoft Store stub);
+    # download once into <app>/ffmpeg/ when nothing usable exists. First call is
+    # always from a background decode/load thread — later UI-thread calls are
+    # no-ops via _audio_deps_ready.
+    from ffmpeg_bootstrap import ensure_ffmpeg  # noqa: F401
 
     import numpy as np
     import soundfile as sf
 
     _np = np
     _sf = sf
-    _ffmpeg = ffmpeg_path()
+    _ffmpeg = ensure_ffmpeg()
     _audio_deps_ready = True
 
 

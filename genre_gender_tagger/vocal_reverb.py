@@ -131,7 +131,7 @@ class VocalReverbRouterOnnx:
                 sys.path.insert(0, str(root))
             from ort_util import create_ort_session
 
-        self.session = create_ort_session(self.onnx_path, device=device or "cpu")
+        self.session = create_ort_session(self.onnx_path, device=device or "")
         # 'device' kept for API parity; ONNX provider choice is the real knob.
         self.device = self.session.get_providers()[0]
 
@@ -533,8 +533,8 @@ def load_vocal_reverb(
     """
     model_dir = Path(model_dir)
     onnx_path = model_dir / "vocal_reverb.onnx"
-    # Frozen / no-GPU: default ONNX to CPU (avoids DirectML EP spam).
-    onnx_device = device if device is not None else "cpu"
+    # Empty device → ort_util picks CUDA EP when available (same as MAEST/PaSST).
+    onnx_device = device if device is not None else ""
 
     if os.environ.get("STEM_ONNX", "1").strip() != "0" and onnx_path.is_file():
         try:

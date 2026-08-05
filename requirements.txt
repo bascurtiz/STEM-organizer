@@ -1,19 +1,26 @@
 PySide6>=6.6,<6.9
 PySide6-Fluent-Widgets>=1.11,<2
-# Default ship path: onnxruntime-gpu (CUDA EP). No torch/demucs in freeze.
+# Ship path: onnxruntime-gpu (CUDA EP). HTDemucs requires CUDA (DirectML
+# historically rejected for Demucs); taggers use the same ORT build (CUDA when
+# a real NVIDIA GPU is present).
 numpy
 scipy
 soundfile
 sounddevice
 # GPU stack pinned to the working freeze (cuDNN 9.24 + CUDA 12.9 wheels
-# match onnxruntime-gpu 1.28). Demucs GPU = CUDA EP only (not DirectML).
+# match onnxruntime-gpu 1.28). Classify GPU = CUDA EP (not DirectML).
 onnxruntime-gpu==1.28.0
+onnx
 nvidia-cudnn-cu12==9.24.0.43
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cuda-runtime-cu12==12.9.79
 nvidia-cuda-nvrtc-cu12==12.9.86
+# nvidia-cufft is needed by onnxruntime-gpu CUDA EP (cuFFT ops).
+# Pin matches .build-venv (cuFFT 11.4 + ORT 1.28); 12.9.x cufft is incompatible here.
+nvidia-cufft-cu12==11.4.1.4
 psutil
 requests
+packaging
 librosa
 soxr
 audioread

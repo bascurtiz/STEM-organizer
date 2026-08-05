@@ -9,6 +9,7 @@ Source: genre_gender_tagger\\venv when present.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -235,16 +236,36 @@ class TaggerWorker(QThread):
             def _tune_log(msg: str, tag: str = "info") -> None:
                 self.log_line.emit(msg, tag)
 
+            on_gpu = False
+            try:
+                from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+                on_gpu = bool(
+                    os.environ.get("STEM_ORT_CUDA", "1").strip() != "0"
+                    and cuda_ep_usable()
+                    and nvidia_gpu_present()
+                )
+            except Exception:
+                on_gpu = False
+
             hint = ensure_tuned(
                 input_dir,
                 self._settings,
                 workload=workload,
                 log=_tune_log,
+                inference_on_gpu=on_gpu,
             )
             # Respect explicit parent-process env overrides.
             env.setdefault("GG_AUDIO_WORKERS", str(hint.audio_workers))
             env.setdefault("GG_BATCH_SIZE", str(hint.gpu_batch_size))
             env.setdefault("GG_FILE_CHUNK", str(hint.file_chunk))
+            if not on_gpu:
+                # Stop OpenMP/BLAS from multiplying against ORT + FE threads.
+                env.setdefault("OMP_NUM_THREADS", "1")
+                env.setdefault("MKL_NUM_THREADS", "1")
+                env.setdefault("OPENBLAS_NUM_THREADS", "1")
+                env.setdefault("NUMEXPR_NUM_THREADS", "1")
+                env.setdefault("STEM_ORT_INTRA_OP", "2")
 
         try:
             self._proc = subprocess.Popen(

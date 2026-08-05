@@ -83,6 +83,8 @@ STEM_COLORS = {
     "vocals":       "#a855f7",
     "acapella":     "#a855f7",
     "vocal":        "#a855f7",
+    "guitar":       "#376FAC",
+    "piano":        COLORS["log_fg"],  # #d6dae8 — same fill as dry badge
     "instrumental": "#60A5FA",
     "original":     "#9aa0b4",
     "mixture":      "#9aa0b4",
@@ -521,7 +523,9 @@ def build_app_overrides_qss() -> str:
     QScrollArea > QWidget {{
         background-color: {c['bg']};
     }}
-    /* No seam between Rename tab page and PATH — rules scrollbar is the divider */
+    /* No seam between Rename tab page and PATH — the Rename body divider
+       (RenameBodyDivider) is painted the page background color (#1e1f26),
+       so the 4-px split between the rules and preview panels is invisible. */
     TabWidget, TabWidget > QWidget, QStackedWidget {{
         border: none;
         background-color: transparent;
@@ -548,34 +552,11 @@ def build_app_overrides_qss() -> str:
         background: transparent;
         height: 0px;
     }}
-    /* Rules panel: AlwaysOn bar is the center divider — thumb must read clearly
-       (theme scrollbar tokens are too close to bg/border and look like a plain line). */
+    /* Rules panel uses the Fluent overlay scrollbar (same as the Preview
+       table); its native bar is hidden, so no RulesScroll bar QSS is needed. */
     QScrollArea#RulesScroll {{
         border: none;
         background: transparent;
-    }}
-    QScrollArea#RulesScroll QScrollBar:vertical {{
-        background: {c['bg']};
-        width: 12px;
-        margin: 0px;
-        border: none;
-        border-left: 1px solid {t['border']};
-    }}
-    QScrollArea#RulesScroll QScrollBar::handle:vertical {{
-        background: #6b7280;
-        min-height: 40px;
-        border-radius: 5px;
-        margin: 2px;
-    }}
-    QScrollArea#RulesScroll QScrollBar::handle:vertical:hover {{
-        background: #9aa0b4;
-    }}
-    QScrollArea#RulesScroll QScrollBar::add-line:vertical,
-    QScrollArea#RulesScroll QScrollBar::sub-line:vertical,
-    QScrollArea#RulesScroll QScrollBar::add-page:vertical,
-    QScrollArea#RulesScroll QScrollBar::sub-page:vertical {{
-        background: transparent;
-        height: 0px;
     }}
     QScrollBar:horizontal {{
         background: {c['log_bg']};
@@ -1410,6 +1391,13 @@ def polish_fluent_controls(root: QWidget) -> None:
             continue
         # How it works cards — same dim as RadioHint (AudioTester-style)
         if lbl.objectName() == "HowItWorks":
+            fluent_set_font(lbl, BODY_FONT_PX)
+            if hasattr(lbl, "setTextColor"):
+                lbl.setTextColor(DARK["text_dim"], DARK["text_dim"])
+            continue
+        # "Instrument source" (Rename category table) — muted like the
+        # samplepack "Found labels (N):" header so section labels match.
+        if lbl.objectName() == "InstrumentSourceLbl":
             fluent_set_font(lbl, BODY_FONT_PX)
             if hasattr(lbl, "setTextColor"):
                 lbl.setTextColor(DARK["text_dim"], DARK["text_dim"])

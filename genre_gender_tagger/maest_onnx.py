@@ -95,9 +95,12 @@ class MaestModelOnnx:
                 sys.path.insert(0, str(root))
             from ort_util import create_ort_session
 
-        self.session = create_ort_session(onnx_path, device=device or "cpu")
+        self.session = create_ort_session(onnx_path, device=device)
         self.config = SimpleNamespace(id2label=id2label, num_labels=len(id2label))
-        self.device = device or "onnx"
+        try:
+            self.device = self.session.get_providers()[0]
+        except Exception:
+            self.device = device or "onnx"
 
     def eval(self):
         return self

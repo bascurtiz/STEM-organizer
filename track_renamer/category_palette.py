@@ -226,6 +226,51 @@ def applied_category_colors(rules: list[Rule]) -> dict[str, str]:
     return colors
 
 
+def match_label_to_category(label: str, categories: list) -> tuple[str, str]:
+    """Return ``(category_name, color_hex)`` if ``label`` matches a category;
+    else ``("", "")``.
+
+    Used both to tint the samplepack chip outline and to drive the bulk
+    "Auto-assign" action, so the two stay in sync by construction.
+
+    A label matches when the engine keyword matcher (``_match_keyword``, which
+    expands singular/plural variants and respects word boundaries) hits either
+    the category **name** (always treated as an implicit term, so chips match
+    even on the empty-keyword Samplepack preset) or one of its comma-separated
+    keywords. ``match_mode`` per category is honored. On multiple matches the
+    longest matching term wins (mirrors runtime ``_apply_category``), then
+    earliest category. Disabled categories are skipped.
+    """
+    from track_renamer.engine.models import CategoryRule
+    from track_renamer.engine.ops import _match_keyword
+
+    best_name = ""
+    best_color = ""
+    best_len = 0
+    for cat in categories:
+        if not isinstance(cat, CategoryRule) or not getattr(cat, "enabled", True):
+            continue
+        name = (cat.name or "").strip()
+        if not name:
+            continue
+        # The category name is always an implicit match term (the Samplepack
+        # preset ships with empty keyword lists, so name-only is the baseline).
+        terms = [name]
+        terms.extend(k.strip() for k in (cat.keywords or "").split(",") if k.strip())
+        mode = getattr(cat, "match_mode", "wholeWord")
+        for term in terms:
+            if not _match_keyword(label, term, mode):
+                continue
+            tlen = len(term)
+            if tlen > best_len:
+                best_len = tlen
+                best_name = name
+                best_color = category_color(
+                    name, getattr(cat, "color", ""), override=getattr(cat, "color_override", False)
+                )
+    return best_name, best_color
+
+
 def list_category_rules(rules: list[Rule]) -> list:
     """Flatten Category Macro rows from the rule stack (first bundle wins).
 

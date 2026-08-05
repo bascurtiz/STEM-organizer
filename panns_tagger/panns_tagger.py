@@ -437,28 +437,52 @@ class _PannsBackend:
         self._label_index = {name: i for i, name in enumerate(self.labels)}
 
     def predict(self, audio: np.ndarray) -> np.ndarray:
-        if audio.size == 0:
-            return np.zeros(len(self.labels), dtype=np.float32)
-        # panns_inference expects (batch, samples)
-        batch = audio[None, :]
-        clipwise, _embedding = self.tagger.inference(batch)
-        probs = np.asarray(clipwise[0], dtype=np.float32)
-        if probs.shape[0] != len(self.labels):
-            # Defensive: truncate / pad if label list drifts.
-            out = np.zeros(len(self.labels), dtype=np.float32)
-            n = min(len(out), probs.shape[0])
-            out[:n] = probs[:n]
-            return out
-        return probs
+        return self.predict_batch([audio])[0]
+
+    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
+        """Sequential torch predicts stacked to (N, C) — no fused batch API."""
+        n_lab = len(self.labels)
+        if not audios:
+            return np.zeros((0, n_lab), dtype=np.float32)
+        out = np.zeros((len(audios), n_lab), dtype=np.float32)
+        for i, audio in enumerate(audios):
+            if audio is None or getattr(audio, "size", 0) == 0:
+                continue
+            batch = np.asarray(audio, dtype=np.float32)[None, :]
+            clipwise, _embedding = self.tagger.inference(batch)
+            probs = np.asarray(clipwise[0], dtype=np.float32)
+            n = min(n_lab, probs.shape[0])
+            out[i, :n] = probs[:n]
+        return out
+
+
+def _pad_waveforms(audios: list[np.ndarray]) -> tuple[np.ndarray, list[int]]:
+    """Zero-pad to max length in chunk. Returns (B, T) and empty-slot indices."""
+    empty_idx: list[int] = []
+    cleaned: list[np.ndarray] = []
+    max_t = 1
+    for i, audio in enumerate(audios):
+        if audio is None or getattr(audio, "size", 0) == 0:
+            empty_idx.append(i)
+            cleaned.append(np.zeros(1, dtype=np.float32))
+        else:
+            a = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
+            cleaned.append(a)
+            if a.shape[0] > max_t:
+                max_t = int(a.shape[0])
+    stacked = np.zeros((len(cleaned), max_t), dtype=np.float32)
+    for i, a in enumerate(cleaned):
+        stacked[i, : a.shape[0]] = a
+    return stacked, empty_idx
 
 
 class _PannsBackendOnnx:
     """ONNX Runtime drop-in for _PannsBackend.
 
-    Same public API (``predict`` / ``labels`` / ``name``). The full Cnn14
-    pipeline (Spectrogram + LogMel + BN + conv blocks) is in the ONNX graph,
-    so input is a raw 32 kHz mono waveform and output is 527 AudioSet probs —
-    no torchlibrosa / librosa needed at runtime.
+    Same public API (``predict`` / ``predict_batch`` / ``labels`` / ``name``).
+    The full Cnn14 pipeline (Spectrogram + LogMel + BN + conv blocks) is in the
+    ONNX graph, so input is a raw 32 kHz mono waveform and output is 527
+    AudioSet probs — no torchlibrosa / librosa needed at runtime.
     """
 
     name = "panns-cnn14"
@@ -475,23 +499,58 @@ class _PannsBackendOnnx:
                 sys.path.insert(0, str(root))
             from ort_util import create_ort_session
 
-        # Empty device → try DirectML then CPU (EP spam muted in ort_util).
         self.session = create_ort_session(onnx_path, device=device or "")
         self.labels = list(labels)
         self.device = device or "onnx"
+        try:
+            providers = self.session.get_providers()
+            if "CUDAExecutionProvider" in providers:
+                self.device = "cuda"
+            elif providers:
+                self.device = str(providers[0]).replace("ExecutionProvider", "").lower()
+        except Exception:
+            pass
         self._label_index = {name: i for i, name in enumerate(self.labels)}
 
     def predict(self, audio: np.ndarray) -> np.ndarray:
-        if audio.size == 0:
-            return np.zeros(len(self.labels), dtype=np.float32)
-        batch = np.ascontiguousarray(audio[None, :], dtype=np.float32)
-        probs = self.session.run(["probs"], {"audio": batch})[0][0]
-        if probs.shape[0] != len(self.labels):
-            out = np.zeros(len(self.labels), dtype=np.float32)
-            n = min(len(out), probs.shape[0])
-            out[:n] = probs[:n]
-            return out
+        return self.predict_batch([audio])[0]
+
+    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
+        """Pad to max T, one ORT ``session.run``. Returns (N, C) float32."""
+        n_lab = len(self.labels)
+        if not audios:
+            return np.zeros((0, n_lab), dtype=np.float32)
+        batch, empty_idx = _pad_waveforms(audios)
+        probs = self.session.run(
+            ["probs"], {"audio": np.ascontiguousarray(batch, dtype=np.float32)}
+        )[0]
+        probs = np.asarray(probs, dtype=np.float32)
+        if probs.ndim == 1:
+            probs = probs[None, :]
+        if probs.shape[1] != n_lab:
+            out = np.zeros((probs.shape[0], n_lab), dtype=np.float32)
+            n = min(n_lab, probs.shape[1])
+            out[:, :n] = probs[:, :n]
+            probs = out
+        for i in empty_idx:
+            probs[i] = 0.0
         return probs
+
+
+def _panns_batch_size() -> int:
+    raw = os.environ.get("PANNS_BATCH_SIZE", "4").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 4
+
+
+def _panns_audio_workers() -> int:
+    raw = os.environ.get("PANNS_AUDIO_WORKERS", "2").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 def load_backend(
@@ -1038,6 +1097,9 @@ def main(argv: list[str] | None = None) -> int:
 
     device = None if args.device == "auto" else args.device
     hop = args.hop_sec if args.hop_sec > 0 else None
+    batch_size = _panns_batch_size()
+    audio_workers = _panns_audio_workers()
+    use_segments = bool(args.segment_sec and args.segment_sec > 0)
 
     _status(f"  PANNs tagger (Cnn14 / AudioSet) — {len(files)} file(s)")
     _status(f"  focus: {', '.join(FOCUS_LABELS)}")
@@ -1046,7 +1108,14 @@ def main(argv: list[str] | None = None) -> int:
         device=device,
         status=_status,
     )
-    _status(f"  backend: {backend.name}  labels={len(backend.labels)}")
+    actual_dev = getattr(backend, "device", device or "auto")
+    _status(
+        f"  backend: {backend.name}  device={actual_dev}  "
+        f"labels={len(backend.labels)}"
+    )
+    if not use_segments:
+        _status(f"  batch={batch_size} decode_workers={audio_workers}")
+    _status("")
 
     errors = 0
     skipped = 0
@@ -1054,69 +1123,208 @@ def main(argv: list[str] | None = None) -> int:
     total = len(files)
     started = time.perf_counter()
     batch = bool(args.batch)
-    for i, path in enumerate(files, 1):
-        pct = (100.0 * (i - 1) / total) if total else 0.0
-        print(f"__progress__\t{pct:.1f}\t?\t{i - 1}\t{total}\tpanns", flush=True)
 
-        if args.write_meta and not args.overwrite and _already_tagged(path):
-            skipped += 1
-            if batch:
-                print(f"__gg_processed__\t{i}\t{total}", flush=True)
-            else:
+    def _emit_progress(done: int) -> None:
+        pct = (100.0 * done / total) if total else 0.0
+        print(f"__progress__\t{pct:.1f}\t?\t{done}\t{total}\tpanns", flush=True)
+        if batch and total:
+            print(f"__gg_processed__\t{done}\t{total}", flush=True)
+
+    def _handle_result(path: Path, result: dict, index: int) -> None:
+        nonlocal tagged, errors
+        result["index"] = index
+        result["total"] = total
+        if args.write_meta:
+            try:
+                write_vocal_metadata(
+                    path,
+                    str(result.get("label", "")),
+                    float(result.get("score", 0.0)),
+                    field=args.tag_field,
+                )
+                result["tagged"] = True
+                tagged += 1
+            except Exception as tag_exc:
+                result["tag_error"] = str(tag_exc)
+        if batch:
+            if result.get("error") or result.get("tag_error"):
+                _print_json(result)
+        else:
+            _print_json(result)
+
+    def _result_from_probs(
+        path: Path, audio: np.ndarray, probs: np.ndarray
+    ) -> dict:
+        result = probs_to_result(
+            probs, backend, top_k=args.top, focus_only=args.focus_only
+        )
+        result["path"] = str(path.resolve())
+        result["duration_sec"] = (
+            float(audio.shape[0] / SAMPLE_RATE) if audio is not None and audio.size else 0.0
+        )
+        return result
+
+    # Segment mode stays sequential (rare / UI checkbox hidden).
+    if use_segments:
+        for i, path in enumerate(files, 1):
+            print(
+                f"__progress__\t{(100.0 * (i - 1) / total) if total else 0.0:.1f}"
+                f"\t?\t{i - 1}\t{total}\tpanns",
+                flush=True,
+            )
+            if args.write_meta and not args.overwrite and _already_tagged(path):
+                skipped += 1
+                if batch:
+                    print(f"__gg_processed__\t{i}\t{total}", flush=True)
+                else:
+                    _print_json(
+                        {
+                            "path": str(path.resolve()),
+                            "skipped": True,
+                            "reason": "already tagged",
+                            "index": i,
+                            "total": total,
+                        }
+                    )
+                continue
+            try:
+                result = classify_file(
+                    path,
+                    backend,
+                    top_k=args.top,
+                    focus_only=args.focus_only,
+                    segment_sec=args.segment_sec,
+                    hop_sec=hop,
+                    max_seconds=args.max_seconds,
+                )
+                _handle_result(path, result, i)
+                if batch:
+                    print(f"__gg_processed__\t{i}\t{total}", flush=True)
+            except Exception as exc:
+                errors += 1
                 _print_json(
                     {
                         "path": str(path.resolve()),
-                        "skipped": True,
-                        "reason": "already tagged",
+                        "error": str(exc),
                         "index": i,
                         "total": total,
                     }
                 )
-            continue
+                if batch:
+                    print(f"__gg_processed__\t{i}\t{total}", flush=True)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
 
-        try:
-            result = classify_file(
-                path,
-                backend,
-                top_k=args.top,
-                focus_only=args.focus_only,
-                segment_sec=args.segment_sec,
-                hop_sec=hop,
-                max_seconds=args.max_seconds,
-            )
-            result["index"] = i
-            result["total"] = total
-            if args.write_meta:
-                try:
-                    write_vocal_metadata(
-                        path,
-                        str(result.get("label", "")),
-                        float(result.get("score", 0.0)),
-                        field=args.tag_field,
+        # Pre-filter skips so batches stay full of work.
+        to_run: list[tuple[int, Path]] = []
+        for i, path in enumerate(files, 1):
+            if args.write_meta and not args.overwrite and _already_tagged(path):
+                skipped += 1
+                if not batch:
+                    _print_json(
+                        {
+                            "path": str(path.resolve()),
+                            "skipped": True,
+                            "reason": "already tagged",
+                            "index": i,
+                            "total": total,
+                        }
                     )
-                    result["tagged"] = True
-                    tagged += 1
-                except Exception as tag_exc:
-                    result["tag_error"] = str(tag_exc)
-            if batch:
-                # Errors / tag failures still surface as JSON for the UI.
-                if result.get("error") or result.get("tag_error"):
-                    _print_json(result)
-                print(f"__gg_processed__\t{i}\t{total}", flush=True)
-            else:
-                _print_json(result)
-        except Exception as exc:
-            errors += 1
-            _print_json(
-                {
-                    "path": str(path.resolve()),
-                    "error": str(exc),
-                    "index": i,
-                    "total": total,
-                }
-            )
-            if batch:
-                print(f"__gg_processed__\t{i}\t{total}", flush=True)
+                continue
+            to_run.append((i, path))
+
+        done_count = skipped
+        if skipped:
+            _emit_progress(done_count)
+
+        def _safe_load(item: tuple[int, Path]):
+            idx, path = item
+            try:
+                return idx, path, load_mono_32k(path, max_seconds=args.max_seconds), None
+            except Exception as exc:
+                return idx, path, None, str(exc)
+
+        def _load_chunk(items: list[tuple[int, Path]]):
+            return list(pool.map(_safe_load, items))
+
+        def _bump() -> None:
+            nonlocal done_count
+            done_count += 1
+            _emit_progress(done_count)
+
+        def _infer_chunk(loaded) -> None:
+            nonlocal errors
+            ok_idx: list[int] = []
+            ok_paths: list[Path] = []
+            ok_audios: list[np.ndarray] = []
+            for idx, path, audio, err in loaded:
+                if err is not None or audio is None:
+                    errors += 1
+                    _print_json(
+                        {
+                            "path": str(path.resolve()),
+                            "error": err or "load failed",
+                            "index": idx,
+                            "total": total,
+                        }
+                    )
+                    _bump()
+                    continue
+                ok_idx.append(idx)
+                ok_paths.append(path)
+                ok_audios.append(audio)
+            if not ok_audios:
+                return
+            predict_batch = getattr(backend, "predict_batch", None)
+            try:
+                if callable(predict_batch):
+                    probs_batch = predict_batch(ok_audios)
+                else:
+                    probs_batch = np.stack(
+                        [backend.predict(a) for a in ok_audios], axis=0
+                    )
+            except Exception as exc:
+                _status(f"  [warn] batch infer failed ({exc}); fell back per-file")
+                for idx, path, audio in zip(ok_idx, ok_paths, ok_audios):
+                    try:
+                        probs = backend.predict(audio)
+                        result = _result_from_probs(path, audio, probs)
+                        _handle_result(path, result, idx)
+                    except Exception as exc2:
+                        errors += 1
+                        _print_json(
+                            {
+                                "path": str(path.resolve()),
+                                "error": str(exc2),
+                                "index": idx,
+                                "total": total,
+                            }
+                        )
+                    _bump()
+                return
+            for idx, path, audio, probs in zip(
+                ok_idx, ok_paths, ok_audios, probs_batch
+            ):
+                result = _result_from_probs(path, audio, probs)
+                _handle_result(path, result, idx)
+                _bump()
+
+        with ThreadPoolExecutor(max_workers=audio_workers) as pool:
+            starts = list(range(0, len(to_run), batch_size))
+            next_fut = None
+            for i, start in enumerate(starts):
+                chunk = to_run[start : start + batch_size]
+                if next_fut is not None:
+                    loaded = next_fut.result()
+                    next_fut = None
+                else:
+                    loaded = _load_chunk(chunk)
+                if i + 1 < len(starts):
+                    next_chunk = to_run[
+                        starts[i + 1] : starts[i + 1] + batch_size
+                    ]
+                    next_fut = pool.submit(_load_chunk, next_chunk)
+                _infer_chunk(loaded)
 
     print(f"__progress__\t100.0\t0\t{total}\t{total}\tpanns", flush=True)
     if batch and total:

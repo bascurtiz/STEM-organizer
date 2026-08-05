@@ -28,27 +28,38 @@ def _torch_stft_power(
 
     x: (batch, samples) float32
     returns: (batch, n_freq, n_frames) power
+
+    Uses strided frames + batched ``rfft`` (same math as the old per-frame loop).
     """
     pad = n_fft // 2
     x_pad = np.pad(x, ((0, 0), (pad, pad)), mode="reflect")
     batch, n = x_pad.shape
     # Number of frames: floor((n - n_fft) / hop) + 1  — torch uses this with center pad.
     n_frames = 1 + (n - n_fft) // hop
+    if n_frames < 1:
+        n_freq = n_fft // 2 + 1
+        return np.zeros((batch, n_freq, 0), dtype=np.float32)
+
     # Zero-pad window to n_fft — torch centers win_length inside n_fft.
     win = np.zeros(n_fft, dtype=np.float32)
     pad_left = (n_fft - win_length) // 2
     win[pad_left : pad_left + win_length] = window
-    n_freq = n_fft // 2 + 1
-    out = np.empty((batch, n_freq, n_frames), dtype=np.float32)
-    for b in range(batch):
-        for t in range(n_frames):
-            start = t * hop
-            frame = x_pad[b, start : start + n_fft] * win
-            spec = np.fft.rfft(frame, n=n_fft)
-            out[b, :, t] = (spec.real * spec.real + spec.imag * spec.imag).astype(
-                np.float32
-            )
-    return out
+
+    # (batch, n_frames, n_fft) views into padded audio.
+    item_stride = x_pad.strides[0]
+    sample_stride = x_pad.strides[1]
+    frames = np.lib.stride_tricks.as_strided(
+        x_pad,
+        shape=(batch, n_frames, n_fft),
+        strides=(item_stride, hop * sample_stride, sample_stride),
+        writeable=False,
+    )
+    # Contiguous copy required: overlapping hops share memory; rfft needs C layout.
+    frames = np.ascontiguousarray(frames, dtype=np.float32) * win
+    spec = np.fft.rfft(frames, n=n_fft, axis=-1)
+    power = (spec.real * spec.real + spec.imag * spec.imag).astype(np.float32)
+    # (batch, n_frames, n_freq) → (batch, n_freq, n_frames)
+    return np.transpose(power, (0, 2, 1))
 
 
 _MEL_BASIS: np.ndarray | None = None

@@ -1,0 +1,55 @@
+Changelog v1.0.7:
+- ADDED: Vocal type: PANNs Cnn14 sub-tab under Genre & Gender (Singing/Speech/Rapping/Humming/Choir)
+- ADDED: Key detector: in-house trained model with KeyNet CNN (outperforming original model + MIK)
+- ADDED: Integrity tab: Compression (FLAC Detective), Corruption (fast/deep verify + foobar alike-fix), Convert (all-to-FLAC in one-go)
+- ADDED: Charts tab: scan library roots, KPIs, genre/style breakdown, SI-SDR bars, balance export, PNG/PDF report (to share or print)
+- ADDED: Shared metadata layer (meta_tags, musical_keys) — safer tag read/write across tabs
+- ADDED: Downstream auto-fill — Classify output paths propagate to Match, Align, Genre, Key, Charts, etc.
+- UPDATED: Help sections with clickable source links (Demucs, SI-SDR, Type 1/2, Consensus Balanced dataset, etc.)
+- UPDATED: Genre log badges use per-genre chart colors
+- UPDATED: install-deps.bat / build.bat — flac-detective, soxr, mp3val/flac/ffmpeg, Key + PANNs deps; bundle key_tagger
+- UPDATED: README — full tab list, install/build flow, metadata tag reference + screenshots + video link
+
+REINSTALL IS NEEDED, DUE EXTRA DEPENDENCIES.
+See: https://youtu.be/9xvfCQVhs1Y how to install & use
+
+
+v1.0.6:
+- GUI rewrite to PySide6: way better user experience - responsive/feels native
+- ADDED: Rename instrument ML model: PaSST OpenMIC-2018 (20-class instruments detector)
+- ADDED: Rename: Add your own Category in Macro — add (+) / remove (✕) category rows
+- ADDED: Rename: Right-click context menu to change samples to a different category
+- ADDED: Genre tagger: no hard torchaudio dependency (librosa resample)
+- ADDED: Gender tagger: Discogs-EffNet now uses ONNX Runtime DirectML (instead of TensorFlow) - drastically faster (GPU support)
+- FIXED: progress in Genre & Gender never reached progress (bottom) bar
+- FIXED: Gender could run into OOM
+- Slimmed down on dependencies
+- Cleaned up build.bat / install-deps.bat + added more clear instructions
+- Made UI simpler + rounded corners
+- Logo update
+- Updated video incl. usage per feature demo
+
+
+- Gender tab: dry/wet classifier via in-house trained vocal mel-CNN 
+- Tag writing for FLAC / MP3 / M4A / WAV
+- FIXED: Gender tagging could run OOM
+- FIXED: Hand cursor on radios, checkboxes, and sliders
+- FIXED: white hover flash on radio labels
+- FIXED: window-edge resize cursor appearing on button corners
+- FIXED: splash→UI handoff (lazy Rename load; main window visibility)
+- Bumped to version 1.0.5
+
+REINSTALL IS NEEDED, DUE EXTRA DEPENDENCIES.
+See: https://youtu.be/Zqj6thKYrUs how to install & use
+
+- when GUI was minimzed, and brought back up, the GUI shrunk to a minimal size. FIXED.
+- Assertion error by adding pre-scan for 0 bytes files. FIXED.
+- Sometimes keyboard shortcuts wouldnt work when using STEM player on a different folder than processed. FIXED.
+- SDR is now able to determine MP3 (next to FLAC and WAV)
+- SDR is now able to determine mixed folders (acapella, vocals and instrumentals) based on filename, picking the proper type
+- Added Help ? icons for Match + Align to show instructions
+- Added Rename tab/feature
+- Bumped to version 1.0.4
+
+Demo of Rename feature:
+https://streamable.com/q8m0f7

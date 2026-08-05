@@ -106,8 +106,7 @@ if errorlevel 1 (
 
 echo [2/3] ensure torch + torchaudio (%TORCH_LABEL%) ...
 "%PY%" -c "import torch, torchaudio; print('OK torch', torch.__version__, 'cuda=', torch.cuda.is_available())" 2>nul
-if errorlevel 1 (
-    echo torch missing - installing (%TORCH_LABEL%) ...
+if errorlevel 1 (         echo torch missing - installing ^(%TORCH_LABEL^%) ...
     "%PY%" -m pip install torch torchaudio --index-url "%TORCH_INDEX%"
     if errorlevel 1 (
         echo WARNING: torch stack install failed - leaving existing packages.

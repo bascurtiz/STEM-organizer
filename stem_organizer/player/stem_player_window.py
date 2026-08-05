@@ -1,4 +1,4 @@
-﻿"""Stem player window â€” port of stem_player.StemPlayerWindow.
+﻿"""Stem player window — port of stem_player.StemPlayerWindow.
 
 Non-modal QWidget. Header (Load / title / time / transport / master volume /
 meter), timeline + per-track rows (S / M / volume / waveform), and a
@@ -10,7 +10,7 @@ Waveform drawing uses QPainter (see waveform_widget.py).
 
 Keyboard shortcuts:
   Space       play / pause
-  â† / â†’       seek Â±15s
+  Left / Right     seek +/-15s
   [  /  ]     prev / next song
   P / F       mark folder [pass] / [fail]
   1..4        solo stem 1..4   (Shift or !@#$ = mute)
@@ -52,7 +52,11 @@ from qfluentwidgets import (
 )
 
 from .. import theme
-from ..renamer.audio_player_bar import _make_transport_button, _set_transport_icon
+from ..renamer.audio_player_bar import (
+    _make_transport_button,
+    _media_icon,
+    _set_transport_icon,
+)
 from .audio_engine import AudioEngine, PLAYER_SR
 from .audio_io import ensure_player_audio_deps, load_player_audio
 from .meter_widget import MeterWidget
@@ -67,8 +71,9 @@ from .waveform_widget import WaveformWidget
 SEEK_JUMP_SEC = 15
 UI_TICK_MS = 33
 STEM_ORDER_4 = ("bass", "drums", "other", "vocals")
+STEM_ORDER_6 = ("bass", "drums", "other", "vocals", "guitar", "piano")
 DEMUCS_LAYOUT_STEMS = ("other", "drums", "bass")
-FILE_STEM_NAMES = STEM_ORDER_4 + ("instrumental",)
+FILE_STEM_NAMES = STEM_ORDER_6 + ("instrumental",)
 AUDIO_EXTS = (".wav", ".flac", ".mp3", ".ogg", ".m4a", ".aiff", ".aif", ".opus")
 PLAYER_WIN_W = 1180
 PLAYER_WIN_H = 960
@@ -93,6 +98,8 @@ STEM_COLORS = {
     "drums": "#f59e0b",
     "other": "#10b981",
     "vocals": "#a855f7",
+    "guitar": "#376FAC",
+    "piano": "#d6dae8",  # same off-white as dry badge bg
     "instrumental": "#60A5FA",
     "acapella": "#a855f7",
     "original": "#7c5cff",
@@ -102,6 +109,8 @@ STEM_LABELS = {
     "drums": "Drums",
     "other": "Other",
     "vocals": "Vocals",
+    "guitar": "Guitar",
+    "piano": "Piano",
     "instrumental": "Instrumental",
     "acapella": "Acapella",
     "original": "Original",
@@ -249,18 +258,25 @@ def _order_stem_roles(roles: dict) -> List[str]:
     vocal = _vocal_stem_role(roles)
     names = set(roles)
     if vocal and all(k in names for k in DEMUCS_LAYOUT_STEMS):
-        return [vocal, "other", "drums", "bass"]
+        order = [vocal, "other", "drums", "bass"]
+        for extra in ("guitar", "piano"):
+            if extra in names:
+                order.append(extra)
+        return order
     if vocal and "instrumental" in names and "original" in names:
         return [vocal, "instrumental", "original"]
     if vocal and "instrumental" in names:
         return [vocal, "instrumental"]
     if vocal and names.intersection(DEMUCS_LAYOUT_STEMS):
         order = [vocal]
-        for stem in DEMUCS_LAYOUT_STEMS:
+        for stem in (*DEMUCS_LAYOUT_STEMS, "guitar", "piano"):
             if stem in names:
                 order.append(stem)
         return order
-    fallback = ("acapella", "vocals", "instrumental", "other", "drums", "bass", "original")
+    fallback = (
+        "acapella", "vocals", "instrumental", "other", "drums", "bass",
+        "guitar", "piano", "original",
+    )
     order = [name for name in fallback if name in names]
     for name in sorted(names):
         if name not in order:
@@ -282,6 +298,8 @@ def _stem_row_label(name: str, stem_roles: set) -> str:
         return "Acapella"
     if {"other", "drums", "bass"}.issubset(stem_roles):
         return "Vocals"
+    if {"guitar", "piano"}.intersection(stem_roles):
+        return "Vocals"
     return STEM_LABELS.get(name, name.title())
 
 
@@ -299,9 +317,9 @@ def _strip_review_tag(name: str) -> str:
 def list_player_song_folders(library_root: Path) -> List[Path]:
     """Immediate song-folder children of *library_root* (sorted, case-insensitive).
 
-    Uses ``os.scandir`` so ``is_dir`` is free on Windows (DirEntry cache) â€”
+    Uses ``os.scandir`` so ``is_dir`` is free on Windows (DirEntry cache) —
     ``Path.iterdir`` + ``Path.is_dir`` costs an extra stat per entry and was
-    ~6Ã— slower at ~4000 folders in local benchmarks.
+    ~6× slower at ~4000 folders in local benchmarks.
     """
     root = os.fspath(library_root)
     if not os.path.isdir(root):
@@ -447,7 +465,7 @@ class TimelineWidget(QWidget):
 # ---------------------------------------------------------------------------
 
 def _sm_button_style(*, active: bool, danger: bool = False) -> str:
-    """Plain S/M chrome â€” Fluent ToggleButton paints a glitched indicator at 28px."""
+    """Plain S/M chrome — Fluent ToggleButton paints a glitched indicator at 28px."""
     if active:
         bg = theme.COLORS["danger"] if danger else theme.COLORS["accent"]
         fg = theme.COLORS["log_fg"]
@@ -551,7 +569,7 @@ class _FolderNameBar(BodyLabel):
             bg = theme.CONTROL_BG
         else:
             bg = "transparent"
-        # Type+objectName selector only â€” bare color/bg rules restyle QToolTip.
+        # Type+objectName selector only — bare color/bg rules restyle QToolTip.
         self.setStyleSheet(
             f"QLabel#StemFolderChip {{"
             f" color: {theme.DARK['text']}; background-color: {bg};"
@@ -604,7 +622,7 @@ class TrackRow(QWidget):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
 
-        # Left controls â€” vertically centered in the row
+        # Left controls — vertically centered in the row
         ctrl = QFrame()
         ctrl.setFixedWidth(CONTROLS_W - 8)
         ctrl_layout = QVBoxLayout(ctrl)
@@ -688,7 +706,7 @@ class StemPlayerWindow(QWidget):
                 pass
         self.resize(pw, ph)
         self.setMinimumSize(PLAYER_MIN_W, PLAYER_MIN_H)
-        # Opening size used for minimize â†’ taskbar restore (match main GUI).
+        # Opening size used for minimize → taskbar restore (match main GUI).
         self._default_w = pw
         self._default_h = ph
 
@@ -707,7 +725,7 @@ class StemPlayerWindow(QWidget):
         # Center once after first show (frame / thick-frame geometry known).
         self._center_pending = True
         # Closed windows destroy their HWND; reopening must construct a new
-        # StemPlayerWindow (show() on a closed instance â†’ CreateWindowEx fail).
+        # StemPlayerWindow (show() on a closed instance → CreateWindowEx fail).
         self.setAttribute(Qt.WA_DeleteOnClose, True)
 
         # State
@@ -725,7 +743,7 @@ class StemPlayerWindow(QWidget):
         self._busy_generation = 0
         # Library scans use a separate generation so folder loads (which bump
         # _busy_generation) cannot mark a just-finished scan as stale and leave
-        # _song_folders empty â€” that permanently breaks [ ] / prev/next.
+        # _song_folders empty — that permanently breaks [ ] / prev/next.
         self._library_gen = 0
         self._library_scan_pending = False
         # Queued prev/next steps while a load is in flight or the library list
@@ -791,7 +809,7 @@ class StemPlayerWindow(QWidget):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        # FluentIcon (theme fg) â€” not ðŸ“ emoji (Windows yellow color glyph).
+        # FluentIcon (theme fg) — not 📁 emoji (Windows yellow color glyph).
         self.load_btn = PushButton(FluentIcon.FOLDER, "Load")
         self.load_btn.setToolTip(
             theme.format_tooltip(
@@ -810,25 +828,23 @@ class StemPlayerWindow(QWidget):
         self.time_lbl.pixelFontSize = 14
         header.addWidget(self.time_lbl)
 
-        # Transport
-        self.prev_song_btn = PushButton("â—€")
-        self.prev_song_btn.setFixedWidth(36)
+        # Transport - same muted QToolButton + painted icons as play (Fluent
+        # PushButton + Unicode glyphs render with font fallback / clip at 32px).
+        self.prev_song_btn = _make_transport_button(self, self._prev_song_folder)
+        self.prev_song_btn.setIcon(_media_icon("prev"))
         self.prev_song_btn.setToolTip("Previous song ([)")
-        self.prev_song_btn.clicked.connect(self._prev_song_folder)
-        # _make_transport_button already connects on_click â€” do not connect again
-        # (double-connect toggles play+pause in one click â†’ appears broken).
+        # _make_transport_button already connects on_click - do not connect again
+        # (double-connect toggles play+pause in one click - appears broken).
         self.play_btn = _make_transport_button(self, self._toggle_play)
         self.play_btn.setToolTip("Play / Pause (Space)")
         _set_transport_icon(self.play_btn, playing=False)
         self.play_btn._is_playing = False
-        self.stop_btn = PushButton("â– ")
-        self.stop_btn.setFixedWidth(36)
+        self.stop_btn = _make_transport_button(self, self._stop)
+        self.stop_btn.setIcon(_media_icon("stop"))
         self.stop_btn.setToolTip("Stop")
-        self.stop_btn.clicked.connect(self._stop)
-        self.next_song_btn = PushButton("â–¶")
-        self.next_song_btn.setFixedWidth(36)
+        self.next_song_btn = _make_transport_button(self, self._next_song_folder)
+        self.next_song_btn.setIcon(_media_icon("next"))
         self.next_song_btn.setToolTip("Next song (])")
-        self.next_song_btn.clicked.connect(self._next_song_folder)
         for b in (self.prev_song_btn, self.play_btn, self.stop_btn, self.next_song_btn):
             header.addWidget(b)
 
@@ -866,7 +882,7 @@ class StemPlayerWindow(QWidget):
         self.tracks_layout = QVBoxLayout(self.tracks_host)
         self.tracks_layout.setContentsMargins(0, 0, 0, 0)
         self.tracks_layout.setSpacing(6)
-        # No trailing stretch â€” stem rows share height equally (CTk uniform='track').
+        # No trailing stretch — stem rows share height equally (CTk uniform='track').
         self.tracks_scroll.setWidget(self.tracks_host)
         content_layout.addWidget(self.tracks_scroll, stretch=1)
 
@@ -912,8 +928,8 @@ class StemPlayerWindow(QWidget):
         if stem_count > 0:
             n = min(stem_count, 4)
             groups.append((tuple(str(i + 1) for i in range(n)), "Solo stem", "gap"))
-            groups.append((tuple(f"â‡§{i + 1}" for i in range(n)), "Mute stem", "gap"))
-            groups.append((("â†", "â†’"), "Seek Â±15s", "gap"))
+            groups.append((tuple(f"Shift+{i + 1}" for i in range(n)), "Mute stem", "gap"))
+            groups.append((("<-", "->"), "Seek +/-15s", "gap"))
             groups.append((("[", "]"), "Prev / Next", "gap"))
             groups.append((("P", "F"), "Pass / Fail", "gap"))
         else:
@@ -921,7 +937,7 @@ class StemPlayerWindow(QWidget):
             groups.append((("[", "]"), "Prev / Next", "gap"))
             groups.append((("P", "F"), "Pass / Fail", "gap"))
 
-        # Equal stretches at ends and between groups â†’ even spread across width.
+        # Equal stretches at ends and between groups → even spread across width.
         self._shortcuts_layout.addStretch(1)
         for i, (keys, label, join) in enumerate(groups):
             if i > 0:
@@ -936,16 +952,16 @@ class StemPlayerWindow(QWidget):
             shortcut = QShortcut(QKeySequence(seq), self)
             shortcut.setContext(Qt.WindowShortcut)
             shortcut.activated.connect(handler)
-            # Keep a Python ref â€” parented QObjects can still be GC'd in PySide.
+            # Keep a Python ref — parented QObjects can still be GC'd in PySide.
             self._shortcuts.append(shortcut)
 
         _sc(Qt.Key_Space, self._toggle_play)
         _sc(Qt.Key_Left, lambda: self._seek_relative(-SEEK_JUMP_SEC))
         _sc(Qt.Key_Right, lambda: self._seek_relative(SEEK_JUMP_SEC))
-        # Prefer key enums â€” string "[" / "]" is unreliable across layouts.
+        # Prefer key enums — string "[" / "]" is unreliable across layouts.
         _sc(Qt.Key_BracketLeft, self._prev_song_folder)
         _sc(Qt.Key_BracketRight, self._next_song_folder)
-        # Explicit letter sequences â€” Qt.Key_P alone can miss lowercase keypresses
+        # Explicit letter sequences — Qt.Key_P alone can miss lowercase keypresses
         # when focus sits on Fluent controls.
         _sc("P", lambda: self._mark_folder_review("pass"))
         _sc("F", lambda: self._mark_folder_review("fail"))
@@ -982,7 +998,7 @@ class StemPlayerWindow(QWidget):
         # Invalidate any in-flight folder load from a previous library.
         self._busy_generation += 1
         self._folder_job_active = False
-        self.title_lbl.setText(f"Scanning {library_root.name}â€¦")
+        self.title_lbl.setText(f"Scanning {library_root.name}...")
         self._sync_folder_name_bar()
         if self._executor is None:
             # Keep pool small: library scan + at most one neighbor prefetch.
@@ -1025,7 +1041,7 @@ class StemPlayerWindow(QWidget):
             self._pending_folder_delta = 0
         target = self._song_folders[idx]
         # Manual Load may already be opening / displaying this song while the
-        # new parent library was scanning â€” sync index only, do not reload.
+        # new parent library was scanning — sync index only, do not reload.
         if self._same_path(self._folder, target):
             self._folder_index = idx
             self._pending_open_index = None
@@ -1167,7 +1183,7 @@ class StemPlayerWindow(QWidget):
                 continue
             track = TrackState(name, path, audio, STEM_COLORS.get(name, theme.COLORS["accent"]))
             track.peaks_full = peaks_full
-            # Keep track.name as the role key (vocals/bass/â€¦) for order + colors.
+            # Keep track.name as the role key (vocals/bass/…) for order + colors.
             # Display label is applied in _build_track_rows via _stem_row_label.
             tracks.append(track)
         return tracks
@@ -1249,7 +1265,7 @@ class StemPlayerWindow(QWidget):
 
     def _clear_track_rows(self) -> None:
         # Remove every row. Leaving a leftover widget made next-track loads
-        # show a duplicate previous stem. No trailing stretch â€” rows themselves
+        # show a duplicate previous stem. No trailing stretch — rows themselves
         # expand to fill the scroll viewport equally.
         while self.tracks_layout.count():
             item = self.tracks_layout.takeAt(0)
@@ -1291,7 +1307,7 @@ class StemPlayerWindow(QWidget):
             row.wave.clicked.connect(self._on_wave_click)
             # Waveform width changes on row layout, not only window resize.
             row.wave.width_changed.connect(self._redraw_timer.start)
-            # Equal stretch â†’ 50/50 for 2 stems, ~25% each for 4 (CTk uniform rows).
+            # Equal stretch → 50/50 for 2 stems, ~25% each for 4 (CTk uniform rows).
             self.tracks_layout.addWidget(row, stretch=1)
             track.row_widget = row
             track.wave_widget = row.wave
@@ -1721,7 +1737,7 @@ class StemPlayerWindow(QWidget):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_review_done(self, new_path: Path, idx: int, verdict: str) -> None:
-        # Update the in-memory library slot in place â€” do NOT rescan thousands
+        # Update the in-memory library slot in place — do NOT rescan thousands
         # of sibling folders on the UI thread (blocks the audio callback GIL).
         old_path = self._folder
         new_path = Path(new_path)
@@ -1773,7 +1789,7 @@ class StemPlayerWindow(QWidget):
     # ----- close -----
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Drop resize mouse-grab before hide â€” otherwise the grip's cursor can
+        # Drop resize mouse-grab before hide — otherwise the grip's cursor can
         # stick on the host window underneath.
         from ..widgets.titlebar import disarm_win32_thick_frame
 
@@ -1862,7 +1878,7 @@ class StemPlayerWindow(QWidget):
         )
 
     def changeEvent(self, event) -> None:  # noqa: N802
-        # Same as MainWindow: minimize â†’ taskbar restore â†’ opening/default size.
+        # Same as MainWindow: minimize → taskbar restore → opening/default size.
         from ..widgets.titlebar import (
             note_activation_chrome_refresh,
             note_minimize_restore_to_default,
@@ -1894,7 +1910,7 @@ class StemPlayerWindow(QWidget):
         return super().nativeEvent(eventType, message)
 
     def _toggle_maximize(self) -> None:
-        """CTk-style work-area fill â€” same path as MainWindow (not OS showMaximized)."""
+        """CTk-style work-area fill — same path as MainWindow (not OS showMaximized)."""
         from ..widgets.titlebar import toggle_work_area_maximize
 
         toggle_work_area_maximize(self)
@@ -1964,7 +1980,7 @@ def open_stem_player(parent=None, library_root: Optional[str] = None):
     if _PLAYER_WINDOW is not None:
         try:
             # Only reuse a still-living, visible window. After close the HWND is
-            # gone (WA_DeleteOnClose); show() on that instance â†’ CreateWindowEx fail.
+            # gone (WA_DeleteOnClose); show() on that instance → CreateWindowEx fail.
             if _PLAYER_Window_visible(_PLAYER_WINDOW):
                 if library_root and (
                     not _PLAYER_WINDOW._library_root

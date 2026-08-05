@@ -191,11 +191,8 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence(f"Ctrl+{i+1}"), self,
                       activated=lambda idx=i: self._jump_to_tab(idx))
 
-        # Initialize device status now (lazy import to avoid torch at module load)
-        try:
-            self.status_bar.set_device_text(self._device_status_text())
-        except Exception:
-            self.status_bar.set_device_text("Device: CPU")
+        # Classify device label (ORT CUDA / DirectML / CPU — not torch).
+        self.refresh_device_status()
 
         # Edge grips need the central widget tree first (see install_frame_resize).
         self._install_edge_resize()
@@ -525,16 +522,32 @@ class MainWindow(QMainWindow):
 
     # ----- device label ------------------------------------------------
 
-    def _device_status_text(self) -> str:
+    def refresh_device_status(self, use_cuda: bool | None = None) -> None:
+        """Update footer Device: from Classify ORT preference / capability."""
         try:
-            import torch  # noqa: WPS433  lazy
-            if torch.cuda.is_available():
-                try:
-                    name = torch.cuda.get_device_name(0)
-                    return f"Device: GPU ({name})"
-                except Exception:
-                    return "Device: GPU"
-            return "Device: CPU"
+            self.status_bar.set_device_text(self._device_status_text(use_cuda))
+        except Exception:
+            self.status_bar.set_device_text("Device: CPU")
+
+    def _device_status_text(self, use_cuda: bool | None = None) -> str:
+        """Reflect Classify compute device (ORT CUDA → DML → CPU).
+
+        Historically probed ``torch.cuda`` only, which always showed CPU in the
+        frozen app (no torch / CPU-only torch) even when Classify ran on CUDA EP.
+        """
+        if use_cuda is None:
+            tab = self._tabs_registered.get("Classify")
+            if tab is not None and hasattr(tab, "use_cuda"):
+                if getattr(tab, "_cuda_enabled", False):
+                    use_cuda = bool(tab.use_cuda.isChecked())
+                else:
+                    use_cuda = False
+            else:
+                use_cuda = bool(self._settings.get("use_cuda", True))
+        try:
+            from ort_util import classify_device_label
+
+            return classify_device_label(bool(use_cuda))
         except Exception:
             return "Device: CPU"
 

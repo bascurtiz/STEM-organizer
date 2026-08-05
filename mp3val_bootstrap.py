@@ -1,8 +1,9 @@
 """Locate / download mp3val next to the app (same pattern as ffmpeg)."""
 from __future__ import annotations
 
-import os
+import hashlib
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,13 @@ _MP3VAL_URL_FALLBACK = (
     "MP3val%200.1.8%20with%20MP3val-frontend%200.1.1%20included/"
     "mp3val-0.1.8_with_frontend-0.1.1-bin-win32.zip/download"
 )
+# Pin the known SF 0.1.8 win32 zip so Schannel/unverified fallbacks cannot
+# accept an HTML interstitial or a swapped archive.
+_MP3VAL_ZIP_SHA256 = (
+    "ad087fcecd98f6a61b0fc028320dc3059f26b18d931b37af9c9291ea75b62451"
+)
+_MP3VAL_ZIP_MIN_BYTES = 50_000
+_UA = "STEM-organizer/mp3val-bootstrap"
 
 
 def _app_dir() -> Path:
@@ -69,10 +77,87 @@ def _find_on_path() -> Optional[str]:
     return None
 
 
-def _download(url: str, dest: Path) -> None:
-    req = Request(url, headers={"User-Agent": "STEM-organizer/mp3val-bootstrap"})
-    with urlopen(req, timeout=120) as resp, open(dest, "wb") as fh:
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _validate_zip(dest: Path) -> None:
+    if dest.stat().st_size < _MP3VAL_ZIP_MIN_BYTES:
+        raise RuntimeError("download too small")
+    digest = _sha256_file(dest)
+    if digest != _MP3VAL_ZIP_SHA256:
+        raise RuntimeError(
+            f"mp3val zip sha256 mismatch (got {digest}, want {_MP3VAL_ZIP_SHA256})"
+        )
+
+
+def _download_urllib(url: str, dest: Path, *, unverified: bool = False) -> None:
+    req = Request(url, headers={"User-Agent": _UA})
+    ctx = ssl._create_unverified_context() if unverified else None
+    with urlopen(req, timeout=120, context=ctx) as resp, open(dest, "wb") as fh:
         shutil.copyfileobj(resp, fh)
+
+
+def _download_curl(url: str, dest: Path) -> None:
+    """Windows curl uses Schannel; SF mirrors often fail Python/OpenSSL verify."""
+    curl = shutil.which("curl") or shutil.which("curl.exe")
+    if not curl:
+        raise FileNotFoundError("curl not found")
+    # -L follow redirects; -f fail on HTTP errors; -S show errors with -s.
+    cmd = [
+        curl,
+        "-fsSL",
+        "-A",
+        _UA,
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        "120",
+        "-o",
+        str(dest),
+        url,
+    ]
+    kwargs: dict = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+    proc = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+        raise RuntimeError(f"curl download failed: {err}")
+
+
+def _download(url: str, dest: Path) -> None:
+    """Fetch ``url`` to ``dest``, tolerating SourceForge mirror SSL breakage.
+
+    Order: strict urllib → Windows curl (Schannel) → urllib with verify off.
+    Every successful path is SHA-256 pinned to the known 0.1.8 win32 zip.
+    """
+    last_err: Exception | None = None
+    attempts: list[tuple[str, object]] = [
+        ("urllib", lambda: _download_urllib(url, dest, unverified=False)),
+    ]
+    if sys.platform == "win32":
+        attempts.append(("curl", lambda: _download_curl(url, dest)))
+    attempts.append(
+        ("urllib-insecure", lambda: _download_urllib(url, dest, unverified=True))
+    )
+
+    for label, fn in attempts:
+        try:
+            if dest.exists():
+                dest.unlink()
+            fn()
+            _validate_zip(dest)
+            return
+        except Exception as exc:  # noqa: BLE001 — try next transport
+            last_err = exc
+            continue
+    assert last_err is not None
+    raise last_err
 
 
 def _extract_mp3val(zip_path: Path, dest_dir: Path) -> Path:
@@ -122,8 +207,6 @@ def ensure_mp3val(*, force_download: bool = False) -> Optional[str]:
         for url in (_MP3VAL_URL, _MP3VAL_URL_FALLBACK):
             try:
                 _download(url, zip_path)
-                if zip_path.stat().st_size < 1000:
-                    raise RuntimeError("download too small")
                 exe = _extract_mp3val(zip_path, dest_dir)
                 _MP3VAL = str(exe.resolve())
                 return _MP3VAL
