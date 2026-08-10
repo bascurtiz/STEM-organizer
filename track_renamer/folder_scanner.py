@@ -63,7 +63,7 @@ def _move_with_retry(
         raise last_exc
 
 
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".aiff", ".aif", ".flac", ".ogg", ".m4a", ".wma"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".aiff", ".aif", ".flac", ".ogg", ".m4a", ".opus", ".wma"}
 MIDI_EXTENSIONS = {".mid", ".midi"}
 DEFAULT_EXTENSIONS = AUDIO_EXTENSIONS | MIDI_EXTENSIONS
 

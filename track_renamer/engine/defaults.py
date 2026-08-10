@@ -72,57 +72,6 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "rim",
         "rimshot",
     ],
-    "Percussion": [
-        "Shaker",
-        "Groove",
-        "Bongo",
-        "Woodblock",
-        "Djembe",
-        "Conga",
-        "Tambourine",
-        "Cowbell",
-        "Timbale",
-        "Agogo",
-        "Bata",
-        "Berimbau",
-        "Cabassa",
-        "Cajon",
-        "Caxixi",
-        "Chimes",
-        "Clave",
-        "Click",
-        "Cuica",
-        "Darbuka",
-        "Dholok",
-        "Finger Cymbal",
-        "Frame Drum",
-        "Glass",
-        "Gong",
-        "Guiro",
-        "Hang Drum",
-        "Metal",
-        "Mixed Percussion",
-        "Percloop",
-        "Pot",
-        "Rainstick",
-        "Rattle",
-        "Snap",
-        "Surdo",
-        "Sweet Bell",
-        "Talking Drum",
-        "Tabla",
-        "Taiko",
-        "Tank Drum",
-        "Timpani",
-        "Triangle",
-        "Udu",
-        "Urumi",
-        "Whistle",
-        "Wood",
-        "Percussion",
-        "perc",
-        "maracas",
-    ],
     "Synth": [
         "Lead",
         "Pad",
@@ -141,13 +90,11 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "swell",
         "Poly",
     ],
-    "Wind": [
+    "Winds": [
         "Wind",
         "Saxophone",
         "Trumpet",
         "Trombone",
-        "Flute",
-        "Harmonica",
         "Bassoon",
         "Brass",
         "Clarinet",
@@ -157,12 +104,21 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "Panpipe",
         "Tuba",
     ],
+    "Flute": [
+        "Flute",
+        "Harmonica",
+        "Pan Flute",
+        "Penny Whistle",
+        "Tin Whistle",
+        "Recorder",
+        "Shakuhachi",
+        "Duduk",
+    ],
     "Keys": [
         "Amapiano",
         "Piano",
         "Electric Piano",
         "Wurlitzer",
-        "Organ",
         "Clavinet",
         "Chord",
         "Keys",
@@ -174,6 +130,18 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "Melodica",
         "Thumb Piano",
         "Rhodes",
+        "Celesta",
+        "Toy Piano",
+    ],
+    "Organ": [
+        "Organ",
+        "Hammond",
+        "B3",
+        "Pipe Organ",
+        "Farfisa",
+        "Vox Continental",
+        "Combo Organ",
+        "Drawbar",
     ],
     "Guitar": [
         "Clean",
@@ -274,65 +242,32 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "lyric",
         "sing",
     ],
-    "Mallet": [
-        "Bell",
-        "Glockenspiel",
-        "Kalimba",
-        "Mallet",
-        "Marimba",
-        "Vibraphone",
-        "Xylophone",
-    ],
-    "Orchestra": [
-        "Kopuz",
-        "Koto",
-        "Mandolin",
-        "Oud",
-        "Qanun",
-        "Saz",
-        "Shamisen",
-        "Sitar",
-        "Sitouki",
-        "Swarmandal",
-        "Tamboura",
-        "Tar",
-        "Ukelele",
-        "Zither",
-    ],
 }
 
 TITLE_CASE_ACRONYMS = "FX, KSHMR, DnB, EDM, ID, USA, UK, OG, BPM, DJ, LFO, MIDI, NYC, LA, DAW"
 
-# OpenMIC-2018 (PaSST) instrument label → Category Macro row.
-OPENMIC_TO_CATEGORY: dict[str, str] = {
-    "accordion": "Keys",
-    "banjo": "Guitar",
+# Stem CNN6 instrument label (lowercased) → Category Macro row. The 11 keys
+# match STEM_CLASSES in instrument_tagger.py 1:1.
+INSTRUMENT_TO_CATEGORY: dict[str, str] = {
     "bass": "Bass",
-    "cello": "Strings",
-    "clarinet": "Wind",
-    "cymbals": "Percussion",
     "drums": "Drums",
-    "flute": "Wind",
+    "flute": "Flute",
+    "fx": "FX",
     "guitar": "Guitar",
-    "mallet_percussion": "Mallet",
-    "mandolin": "Guitar",
-    "organ": "Keys",
-    "piano": "Keys",
-    "saxophone": "Wind",
-    "synthesizer": "Synth",
-    "trombone": "Wind",
-    "trumpet": "Wind",
-    "ukulele": "Guitar",
-    "violin": "Strings",
-    "voice": "Vocals",
+    "keys": "Keys",
+    "organ": "Organ",
+    "strings": "Strings",
+    "synth": "Synth",
+    "vocals": "Vocals",
+    "winds": "Winds",
 }
 
 DEFAULT_CATEGORY_SOURCE = "filename"
 
 
 def map_instrument_to_category(label: str) -> str:
-    """OpenMIC class → Category Macro name, or ''."""
-    return OPENMIC_TO_CATEGORY.get((label or "").strip().lower(), "")
+    """Stem CNN6 class (lowercased) → Category Macro name, or ''."""
+    return INSTRUMENT_TO_CATEGORY.get((label or "").strip().lower(), "")
 
 
 def _merge_keywords(*groups: list[str]) -> str:
@@ -355,16 +290,15 @@ def _build_default_categories() -> list[dict[str, str]]:
     order = [
         "Bass",
         "Drums",
-        "Percussion",
-        "Synth",
-        "Wind",
-        "Keys",
         "Guitar",
-        "FX",
+        "Keys",
+        "Organ",
         "Strings",
+        "Synth",
         "Vocals",
-        "Mallet",
-        "Orchestra",
+        "Flute",
+        "Winds",
+        "FX",
     ]
     return [
         {
@@ -420,8 +354,8 @@ def make_samplepack_category_bundle() -> OpRule:
     from track_renamer.category_palette import DEFAULT_CATEGORY_COLORS, default_category_color
 
     order = [
-        "Bass", "Drums", "Percussion", "Synth", "Wind",
-        "Keys", "Guitar", "FX", "Strings", "Vocals", "Mallet", "Orchestra",
+        "Bass", "Drums", "Guitar", "Keys", "Organ",
+        "Strings", "Synth", "Vocals", "Flute", "Winds", "FX",
     ]
     cats: list[dict[str, str]] = []
     for name in order:

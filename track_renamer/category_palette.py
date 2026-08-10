@@ -47,6 +47,7 @@ CATEGORY_BADGE_LABELS: dict[str, str] = {
 CATEGORY_NAME_ALIASES: dict[str, str] = {
     "Synths": "Synth",
     "Orchestral": "Orchestra",
+    "Winds": "Wind",
 }
 
 # Default color per category name (includes legacy names used in older presets)
@@ -66,6 +67,8 @@ DEFAULT_CATEGORY_COLORS: dict[str, str] = {
     "Mallet": "#C41D63",
     "Orchestra": "#626262",
     "Orchestral": "#626262",  # legacy
+    "Flute": "#1D7E64",
+    "Organ": "#996E10",
 }
 
 _PALETTE_LOWER = {color.lower(): color for color in CATEGORY_PALETTE_COLORS}

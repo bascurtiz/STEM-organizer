@@ -1,4 +1,4 @@
-"""Fill Track.instrument from PaSST OpenMIC (in-process preferred, subprocess fallback)."""
+"""Fill Track.instrument from Stem CNN6 (in-process preferred, subprocess fallback)."""
 
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ def _tagger_script() -> Path:
 
 
 # Bump when model/label set / primary-pick policy changes so stale cache dies.
-_CACHE_MODEL = "passt-openmic-nosynth-g35"
-_CACHE_FILE = "instrument_passt_cache.json"
+_CACHE_MODEL = "stem-cnn6-v1"
+_CACHE_FILE = "instrument_stem_cnn6_cache.json"
 _CACHE_VERSION = 1
 _CACHE_MAX_ENTRIES = 100_000
 
@@ -306,14 +306,19 @@ def _get_inproc_backend(status: Callable[[str], None]):
         if _INPROC_BACKEND is not None:
             return _INPROC_BACKEND
         it = _import_instrument_tagger()
-        status("  loading PaSST OpenMIC (in-process)…")
+        status("  loading Stem CNN6 (in-process)…")
         _INPROC_BACKEND = it.load_backend(status=status)
         status(f"  backend: {_INPROC_BACKEND.name}  device: {_INPROC_BACKEND.device}")
         return _INPROC_BACKEND
 
 
-def _passt_env_defaults(status: Callable[[str], None], pending: list[Path]) -> None:
-    """Set PASST_* / ORT thread caps in this process (in-proc path)."""
+def _cnn6_env_defaults(status: Callable[[str], None], pending: list[Path]) -> None:
+    """Set PASST_* / ORT thread caps in this process (in-proc path).
+
+    The env var names are historical (PASST_BATCH_SIZE / PASST_AUDIO_WORKERS)
+    kept for back-compat with anyone who has set them; the Stem CNN6 runner
+    reads the same names.
+    """
     try:
         from ort_util import cuda_ep_usable, nvidia_gpu_present
         from stem_organizer.io_tune import ensure_tuned
@@ -340,7 +345,6 @@ def _passt_env_defaults(status: Callable[[str], None], pending: list[Path]) -> N
             os.environ.setdefault("MKL_NUM_THREADS", "1")
             os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
             os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-            os.environ.setdefault("STEM_ORT_INTRA_OP", "2")
     except Exception as tune_exc:
         status(f"  [warn] quick-tune skipped: {tune_exc}")
         os.environ.setdefault("PASST_AUDIO_WORKERS", "2")
@@ -357,16 +361,16 @@ def _enrich_inprocess(
     cached_n: int,
     grand_total: int,
 ) -> tuple[int, str | None]:
-    """Run PaSST in this process (reuse ORT session across Analyze runs)."""
+    """Run Stem CNN6 in this process (reuse ORT session across Analyze runs)."""
     it = _import_instrument_tagger()
-    _passt_env_defaults(status, pending)
+    _cnn6_env_defaults(status, pending)
     try:
         backend = _get_inproc_backend(status)
     except Exception as exc:
         return 0, f"in-process tagger failed to load: {exc}"
 
-    batch_size = max(1, int(getattr(it, "_passt_batch_size", lambda: 8)()))
-    audio_workers = max(1, int(getattr(it, "_passt_audio_workers", lambda: 2)()))
+    batch_size = max(1, int(getattr(it, "_cnn6_batch_size", getattr(it, "_passt_batch_size", lambda: 8))()))
+    audio_workers = max(1, int(getattr(it, "_cnn6_audio_workers", getattr(it, "_passt_audio_workers", lambda: 2))()))
     status(f"  batch={batch_size} decode_workers={audio_workers} (in-process)")
 
     def _safe_load(path: Path):
@@ -645,7 +649,6 @@ def enrich_tracks(
                 spawn_env.setdefault("MKL_NUM_THREADS", "1")
                 spawn_env.setdefault("OPENBLAS_NUM_THREADS", "1")
                 spawn_env.setdefault("NUMEXPR_NUM_THREADS", "1")
-                spawn_env.setdefault("STEM_ORT_INTRA_OP", "2")
         except Exception as tune_exc:
             status(f"  [warn] quick-tune skipped: {tune_exc}")
             spawn_env.setdefault("PASST_AUDIO_WORKERS", "2")
@@ -710,8 +713,6 @@ def enrich_tracks(
                             "head ",
                             " self.",
                             "patch_embed",
-                            "Loading PASST",
-                            "Loading PaSST",
                             "(1): Linear",
                             "(head_dist):",
                             "Sequential(",

@@ -18,6 +18,7 @@ No torch / demucs package at runtime. Duck-types HTDemucs for classify_backend.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -245,14 +246,40 @@ def _cuda_available() -> bool:
         return False
 
 
-def _gpu_mem_limit_bytes() -> int:
-    """Soft CUDA arena cap (bytes). Override with STEM_ORT_CUDA_MEM_LIMIT_GB."""
-    raw = os.environ.get("STEM_ORT_CUDA_MEM_LIMIT_GB", "8").strip()
+def _total_vram_bytes() -> int:
+    """Total VRAM of device 0 (bytes) via nvidia-smi; 0 if unavailable."""
     try:
-        gb = float(raw)
-    except ValueError:
-        gb = 8.0
-    return max(1, int(gb * (1024**3)))
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        line = (out.stdout or "").strip().splitlines()[0].strip()
+        return int(line) * 1024 * 1024
+    except Exception:
+        return 0
+
+
+def _gpu_mem_limit_bytes() -> int:
+    """CUDA arena cap (bytes).
+
+    Default: ~75% of device VRAM, clamped to [8 GB, 24 GB].  The old fixed
+    8 GB cap OOMs HTDemucs on big cards (measured ~9 GB peak for one batched
+    forward on an RTX 5090).  Override with STEM_ORT_CUDA_MEM_LIMIT_GB.
+    """
+    raw = os.environ.get("STEM_ORT_CUDA_MEM_LIMIT_GB", "").strip()
+    if raw:
+        try:
+            return max(1, int(float(raw) * (1024**3)))
+        except ValueError:
+            pass
+    total = _total_vram_bytes()
+    if total > 0:
+        cap = int(total * 0.75)
+        cap = max(8 * 1024**3, min(cap, 24 * 1024**3))
+        return cap
+    return 8 * 1024**3
 
 
 def _demucs_session_options(*, want_gpu: bool = False):
@@ -341,8 +368,25 @@ def ensure_batch_dynamic_onnx(onnx_path: Path) -> Path:
     except Exception:
         token = None
 
+    # Already-dynamic verdict cache: the CPU probe below opens a full 316 MB
+    # session (~17 s, GIL held). Persist the verdict so it runs once per model
+    # version, not on every app launch.
+    verdict = src.with_name(f"{src.stem}.dynamic")
+    try:
+        st = src.stat()
+        token = f"{st.st_mtime_ns}:{st.st_size}"
+        if verdict.is_file() and verdict.read_text(encoding="utf-8").strip() == token:
+            return src
+    except Exception:
+        pass
+
     try:
         if _batch_dim_is_dynamic(src):
+            try:
+                st = src.stat()
+                verdict.write_text(f"{st.st_mtime_ns}:{st.st_size}", encoding="utf-8")
+            except Exception:
+                pass
             return src
     except Exception:
         pass
@@ -380,6 +424,31 @@ def _is_batch_shape_error(exc: BaseException) -> bool:
     return "invalid dimensions" in msg or "expected: 1" in msg
 
 
+# Process-wide ORT session reuse. Creating a CUDA session for the ~316 MB
+# Demucs graph takes ~17 s with the GIL held (freezes the Qt UI during the
+# load); the app otherwise builds a fresh session on every run (RMS classify
+# + SI-SDR). Keyed by resolved model path + provider names, so a GPU/CPU
+# switch or model swap gets its own session.
+_DEMUCS_SESSION_CACHE: dict[tuple, object] = {}
+# Serialize creation: the background warm-up and a run's first load can race;
+# both would otherwise see an empty cache and build two sessions back-to-back.
+_DEMUCS_SESSION_LOCK: object = None  # set to threading.Lock() on first use
+
+
+def _session_lock():
+    global _DEMUCS_SESSION_LOCK
+    if _DEMUCS_SESSION_LOCK is None:
+        import threading
+
+        _DEMUCS_SESSION_LOCK = threading.Lock()
+    return _DEMUCS_SESSION_LOCK
+
+
+def _session_cache_key(path: Path, providers: list) -> tuple:
+    names = tuple(p[0] if isinstance(p, tuple) else p for p in providers)
+    return (str(path), names)
+
+
 def _open_demucs_session(onnx_path: Path, *, want_gpu: bool):
     import onnxruntime as ort
 
@@ -392,8 +461,18 @@ def _open_demucs_session(onnx_path: Path, *, want_gpu: bool):
             pass
     path = ensure_batch_dynamic_onnx(Path(onnx_path))
     providers = _demucs_providers(want_gpu=want_gpu)
-    so = _demucs_session_options(want_gpu=want_gpu and _cuda_available())
-    return ort.InferenceSession(str(path), sess_options=so, providers=providers)
+    key = _session_cache_key(path, providers)
+    cached = _DEMUCS_SESSION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _session_lock():
+        cached = _DEMUCS_SESSION_CACHE.get(key)
+        if cached is not None:
+            return cached
+        so = _demucs_session_options(want_gpu=want_gpu and _cuda_available())
+        sess = ort.InferenceSession(str(path), sess_options=so, providers=providers)
+        _DEMUCS_SESSION_CACHE[key] = sess
+        return sess
 
 
 class DemucsOnnxModel:

@@ -68,13 +68,20 @@ _CHIP_PAD = "\u00A0"
 LOG_STEM_COLORS = {
     "bass":         "#ef4444",
     "drums":        "#f59e0b",
+    "flute":        "#1d7e64",
+    "fx":           "#000000",
+    "guitar":       "#C1090B",
+    "keys":         "#485fab",
+    "organ":        "#996e10",
     "other":        "#10b981",
+    "piano":        theme.COLORS["log_fg"],  # #d6dae8 — same as dry badge
+    "strings":      "#76c043",
+    "synth":        "#10b981",
     "vocals":       "#a855f7",
+    "wind":         "#00b8d3",
     "instrumental": "#60A5FA",
     "acapella":     "#a855f7",
     "vocal":        "#a855f7",
-    "guitar":       "#376FAC",
-    "piano":        theme.COLORS["log_fg"],  # #d6dae8 — same as dry badge
     "original":     "#9aa0b4",
 }
 LOG_GG_COLORS = {
@@ -124,8 +131,8 @@ LOG_GG_FG = {
     "wet": theme.COLORS["log_fg"],
     "lossless": "#262833",
     "lossy": "#262833",
-    # AUTHENTIC / FAKE_CERTAIN: log_fg on dark badges (not pure white).
-    # WARNING: dark text on yellow badge.
+    # Integrity verdicts: warning/suspicious sit on a light-yellow fill, so
+    # they need dark text; authentic/fake_certain on dark fills take light.
     "authentic": theme.COLORS["log_fg"],
     "warning": "#262833",
     "suspicious": "#262833",
@@ -147,14 +154,11 @@ for _k in _KEY_CHIP_DISPLAY:
 LOG_SKIP_COLOR = "#636b7a"
 
 
-_GENRE_CHIP_LIGHT_TEXT = frozenset({"non-music"})
-
-
 def _genre_chip_fg(genre: str) -> str:
-    """Genre badge text — dark by default; white on very dark fills only."""
-    if (genre or "").strip().casefold() in _GENRE_CHIP_LIGHT_TEXT:
-        return _CHIP_FG_LIGHT
-    return "#262833"
+    """Genre badge text — dark only on Jazz, soft white everywhere else."""
+    if (genre or "").strip().lower() == "jazz":
+        return "#262833"
+    return _CHIP_FG_LIGHT
 
 
 def _genre_chip_bg(genre: str) -> str:
@@ -165,9 +169,10 @@ def _genre_chip_bg(genre: str) -> str:
         return LOG_GG_COLORS["dry"]
     return genre_colors_for([name]).get(name, LOG_GG_COLORS["dry"])
 
-# CTk: r'^(\s+)([a-z_]+)(?: (\d+%))?(?: \(margin [^)]+\))?(  →  .+)$'
+# Match classify log lines and render the stem label as a colored chip.
+# Format: "  LABEL → category 99%  →  filename" or "  label 61%  →  file"
 STEM_CLASSIFY_RE = re.compile(
-    r"^(\s+)([a-z_]+)(?: (\d+%))?(?: \(margin [^)]+\))?(  →  )(.+)$"
+    r"^(\s+)([A-Za-z_]+)(?: → [a-z_]+)?(?: (\d+%))?(?: \(margin [^)]+\))?(  →  )(.+)$"
 )
 # Key badges include / and # (Db/C#, Abm/G#m). Longest-first for alternation.
 _KEY_BADGE_ALTS = "|".join(
@@ -210,6 +215,9 @@ GG_CONF_LEGACY_RE = re.compile(
 )
 # Distribute originals: green "matched:" · rest (folder · %) in default color
 MATCHED_LINE_RE = re.compile(r"^(\s*)(matched:)\s*(.*)$", re.IGNORECASE)
+# qfluentwidgets promo banner ("QFluentWidgets Pro is now released") — dropped
+# at _append if it ever reaches the log from a captured stream.
+FLUENT_PROMO_RE = re.compile(r"QFluentWidgets Pro", re.IGNORECASE)
 
 
 class ChipRenderer:
@@ -800,6 +808,8 @@ class LogPanel(QWidget):
 
     def _append(self, text: str, tag: str) -> None:
         if not text and not tag:
+            return
+        if FLUENT_PROMO_RE.search(text):
             return
         line = text.rstrip("\n")
         self._record_plain(line)

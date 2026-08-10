@@ -319,7 +319,7 @@ def load_ml_deps(set_status=None):
     status('Loading soundfile…')
     import soundfile as sf
 
-    # Prefer HTDemucs / Vocal CNN6 ONNX — skip torch entirely when any
+    # Prefer HTDemucs / Stem CNN6 ONNX — skip torch entirely when any
     # separator/classifier weight is present (avoids co-loading torch+ORT).
     try:
         from demucs_onnx import resolve_htdemucs_onnx
@@ -332,10 +332,10 @@ def load_ml_deps(set_status=None):
     except ImportError:
         pass
     try:
-        from vocal_classifier_onnx import vocal_classifier_installed
+        from stem_cnn6_onnx import stem_cnn6_installed
 
-        if vocal_classifier_installed():
-            status('Vocal CNN6 ONNX ready (torch not loaded)…')
+        if stem_cnn6_installed():
+            status('Stem CNN6 ONNX ready (torch not loaded)…')
             import onnxruntime  # noqa: F401
 
             return np, sf, None, None, None, None
@@ -362,9 +362,9 @@ def demucs_onnx_present() -> bool:
     except Exception:
         pass
     try:
-        from vocal_classifier_onnx import vocal_classifier_installed
+        from stem_cnn6_onnx import stem_cnn6_installed
 
-        return bool(vocal_classifier_installed())
+        return bool(stem_cnn6_installed())
     except Exception:
         return False
 
@@ -548,10 +548,14 @@ def demucs_model_cached(model_id: str) -> bool:
     """
     mid = (model_id or "").strip().lower()
     if mid == "vocal_cnn6":
+        # Only stem_cnn6.onnx — legacy vocal_classifier.onnx retired.
+        # Resolver searches app_dir (exe folder) when frozen.
+        # Use the resolver (searches app_dir = exe folder when frozen) so the
+        # check finds the installer-placed weight, not just paths beside this file.
         try:
-            from vocal_classifier_onnx import vocal_classifier_installed
+            from stem_cnn6_onnx import stem_cnn6_installed
 
-            return bool(vocal_classifier_installed())
+            return bool(stem_cnn6_installed())
         except Exception:
             return False
     # htdemucs + all legacy/retired ids resolve to HTDemucs.

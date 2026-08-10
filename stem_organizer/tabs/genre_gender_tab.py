@@ -554,13 +554,13 @@ class GenreGenderTab(QWidget):
             self._sync_vocal_from_gender()
 
     def _sync_vocal_from_gender(self, *_args) -> None:
-        """Vocal type uses the same input folder as Gender."""
+        """Vocal type uses the same input folder as Gender — only when empty."""
         if self._loading:
             return
         gender = self.gender_input_row.text().strip()
         if not gender:
             return
-        if self.vocal_input_row.text().strip() != gender:
+        if not self.vocal_input_row.text().strip():
             self.vocal_input_row.set_text(gender)
 
     # ----- action bar -----
@@ -1014,7 +1014,7 @@ class GenreGenderTab(QWidget):
                 if not self.gender_input_row.text().strip():
                     self.gender_input_row.set_text(classify_out)
             gender_path = self.gender_input_row.text().strip()
-            if gender_path:
+            if gender_path and not self.vocal_input_row.text().strip():
                 self.vocal_input_row.set_text(gender_path)
         finally:
             self._loading = False

@@ -36,12 +36,13 @@ TIPS = {
     "category_color": "Click to change this category's color.",
     "instrument_source": "How the category PREFIX is chosen for each file.",
     "instrument_source_filename": "Filename: match keywords in the current name against the category rows below. No audio listening — preview updates immediately with Apply.",
-    "instrument_source_auto": "Audio: classify the audio with ML (PaSST OpenMIC-2018, 20 instruments) and map the top label to a category PREFIX.",
+    "instrument_source_auto": "Audio: classify the audio with ML (Stem CNN6, 11 instrument classes) and map the top label to a category PREFIX.",
     "instrument_source_combo": "Combo: try Filename keywords first; if none match, fall back to Audio on that file's audio.",
     "add_child_rule": "Add another operation inside this condition group.",
     "select_all": "Select every file in the preview for renaming.",
     "deselect_all": "Deselect every file in the preview.",
     "only_changed": "Show only files that will be modified by the current rules.",
+    "back_to_files": "Dismiss the Analyze log and show the file list again.",
     "file_checkbox": "Include or exclude this file when applying renames.",
     "detected_keyword": "Filename keyword that matched, or <audio-determined> when the category came from ML listening.",
     "change_prefix": (
@@ -51,7 +52,7 @@ TIPS = {
     "cancel": "Stop Analyze (Auto-detect) or clear the active preview selection.",
     "rename": "Permanently rename the selected files on disk.",
     "analyze": (
-        "Run Auto-detect (PaSST OpenMIC) on the selected files, then confirm rename. "
+        "Run Auto-detect (Stem CNN6) on the selected files, then confirm rename. "
         "Preview Apply does not analyze audio — only this button does."
     ),
     "remove_text": "Text to remove from the filename.",
@@ -62,7 +63,7 @@ TIPS = {
     "cancel_dialog": "Dismiss without saving.",
     # Radio values are filename / model / combo (UI label for model = Audio).
     "instrument_source_model": (
-        "Audio: classify the audio with ML (PaSST OpenMIC-2018, 20 instruments) "
+        "Audio: classify the audio with ML (Stem CNN6, 11 instrument classes) "
         "and map the top label to a category PREFIX."
     ),
 }

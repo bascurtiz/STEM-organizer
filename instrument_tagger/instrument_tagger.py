@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
-OpenMIC-2018 instrument classifier (PaSST).
+Stem CNN6 instrument classifier (11-class, raw-waveform ONNX).
 
-20-class multi-label model (hear21passt / kkoutini PaSST openmic checkpoint).
+Replaces the former PaSST OpenMIC-2018 runner. The model bakes its own
+STFT + LogMel frontend into the ONNX graph, so this runner feeds raw 32 kHz
+mono waveforms straight to ONNX Runtime — no external mel frontend, no torch,
+no hear21passt.
+
+Classes (must match train_vocal_classifier.CLASSES and the ONNX output column
+order — column i == STEM_CLASSES[i]):
+    BASS, DRUMS, FLUTE, FX, GUITAR, KEYS, ORGAN, STRINGS, SYNTH, VOCALS, WINDS
 
 Phase-1 CLI: classify files / folder → JSON lines on stdout.
 """
@@ -10,78 +17,11 @@ Phase-1 CLI: classify files / folder → JSON lines on stdout.
 from __future__ import annotations
 
 import argparse
-import contextlib
-import io
 import json
 import os
 import sys
 import warnings
 from pathlib import Path
-
-
-def _bootstrap_sibling_site_packages() -> None:
-    """Ensure ``site-packages`` (beside STEM-organizer.exe) is on ``sys.path``.
-
-    Matches frozen Auto-detect launch: ``PYTHONPATH=<exe_dir>\\site-packages``.
-    Prefer ``STEM_SITE_PACKAGES`` from the parent exe, then walk parents for
-    ``STEM-organizer.exe`` / ``hear21passt`` — never trust ``_internal`` alone.
-    """
-    candidates: list[Path] = []
-    seen: set[str] = set()
-
-    def add(path: Path | None) -> None:
-        if path is None:
-            return
-        try:
-            path = path.resolve()
-        except OSError:
-            pass
-        key = str(path)
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append(path)
-
-    explicit = os.environ.get("STEM_SITE_PACKAGES", "").strip()
-    if explicit:
-        add(Path(explicit))
-
-    for part in os.environ.get("PYTHONPATH", "").split(os.pathsep):
-        part = part.strip()
-        if part:
-            add(Path(part))
-
-    here = Path(__file__).resolve().parent
-    for folder in (here, *here.parents):
-        if folder.name.lower() == "_internal":
-            continue
-        add(folder / "site-packages")
-        # App root: folder that holds the .exe
-        if any(
-            (folder / name).is_file()
-            for name in ("STEM-organizer.exe", "stem-organizer.exe", "STEM_organizer.exe")
-        ):
-            add(folder / "site-packages")
-            break
-
-    # Prefer a site-packages that actually contains hear21passt.
-    ordered = sorted(
-        candidates,
-        key=lambda p: (
-            0 if (p.is_dir() and (p / "hear21passt").is_dir()) else 1,
-            0 if p.is_dir() else 1,
-        ),
-    )
-    for site in ordered:
-        if not site.is_dir():
-            continue
-        entry = str(site)
-        if entry not in sys.path:
-            sys.path.insert(0, entry)
-        break
-
-
-_bootstrap_sibling_site_packages()
 
 import numpy as np
 import soundfile as sf
@@ -94,51 +34,47 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 # ----------------------------------------------------------
-# Constants (PaSST OpenMIC — 32 kHz, ~10 s clips)
+# Constants — Stem CNN6 (32 kHz, 10 s clips, raw-waveform input)
 # ----------------------------------------------------------
 
 SAMPLE_RATE = 32000
 MAX_AUDIO_SECONDS = 10.0
-# PaSST OpenMIC expects 998 mel frames @ hop=320.
-# Preemphasis conv1d (k=2, no pad) drops 1 sample → add +1 so STFT still yields 998.
-CLIP_SAMPLES = 997 * 320 + 1
+CLIP_SAMPLES = int(SAMPLE_RATE * MAX_AUDIO_SECONDS)  # 320000 — training segment
 
-# If synthesizer is #1, demote to runner-up when raw sigmoid gap ≤ this.
-# Larger = fewer Synth prefixes (more aggressive demote).
-SYNTH_DEMOTE_MAX_GAP = 0.35
+# Cap chunks/files per Session.run() to bound peak memory. The exported graph
+# has a dynamic batch axis, so pooling many clips into one call is much faster
+# than one call per clip — especially on GPU.
+MAX_ONNX_BATCH = 16
 
 HERE = Path(__file__).resolve().parent
-MODEL_DIR = HERE / "models"
+# Single model source: the root models/ folder (beside the exe when frozen).
+MODEL_DIR = HERE.parent / "models"
+ONNX_FILENAME = "stem_cnn6.onnx"
 
-# Alphabetical OpenMIC-2018 instrument vocabulary (official order).
-OPENMIC_INSTRUMENTS = (
-    "accordion",
-    "banjo",
-    "bass",
-    "cello",
-    "clarinet",
-    "cymbals",
-    "drums",
-    "flute",
-    "guitar",
-    "mallet_percussion",
-    "mandolin",
-    "organ",
-    "piano",
-    "saxophone",
-    "synthesizer",
-    "trombone",
-    "trumpet",
-    "ukulele",
-    "violin",
-    "voice",
+# Class index map — MUST match train_vocal_classifier.CLASSES and the ONNX
+# output column order. Single source of truth is the training script; this is
+# a verbatim copy so the runner has no dependency on the training project.
+STEM_CLASSES = (
+    "BASS",
+    "DRUMS",
+    "FLUTE",
+    "FX",
+    "GUITAR",
+    "KEYS",
+    "ORGAN",
+    "STRINGS",
+    "SYNTH",
+    "VOCALS",
+    "WINDS",
 )
+N_CLASSES = len(STEM_CLASSES)
 
 AUDIO_EXTENSIONS = {
     ".wav",
     ".flac",
     ".mp3",
     ".ogg",
+    ".opus",
     ".m4a",
     ".aac",
     ".aif",
@@ -159,7 +95,12 @@ def _print_json(obj: dict) -> None:
 
 
 def load_mono_32k(filename: str | Path) -> np.ndarray:
-    """Mono float32 @ 32 kHz, first MAX_AUDIO_SECONDS."""
+    """Mono float32 @ 32 kHz, first MAX_AUDIO_SECONDS.
+
+    Loads the first ~10 s, downmixes to mono, resamples to 32 kHz, and pads /
+    trims to CLIP_SAMPLES. Peak-normalises only if the signal exceeds 1.0
+    (matches the training-time preprocessing exactly).
+    """
     import librosa
 
     max_src = None
@@ -170,23 +111,28 @@ def load_mono_32k(filename: str | Path) -> np.ndarray:
     except Exception:
         max_src = None
 
-    data, sr = sf.read(
-        str(filename),
-        always_2d=True,
-        dtype="float32",
-        frames=max_src if max_src else -1,
-    )
-    audio = data.mean(axis=1)
-    if sr != SAMPLE_RATE:
-        audio = librosa.resample(
-            audio,
-            orig_sr=sr,
-            target_sr=SAMPLE_RATE,
-            res_type="soxr_hq",
+    try:
+        data, sr = sf.read(
+            str(filename),
+            always_2d=True,
+            dtype="float32",
+            frames=max_src if max_src else -1,
         )
+        audio = data.mean(axis=1)
+        if sr != SAMPLE_RATE:
+            audio = librosa.resample(
+                audio,
+                orig_sr=sr,
+                target_sr=SAMPLE_RATE,
+                res_type="soxr_hq",
+            )
+    except Exception:
+        # sf can't decode some codecs (m4a/aac/opus) — librosa/audioread uses
+        # ffmpeg (bundled app ffmpeg is on PATH).
+        audio, _ = librosa.load(str(filename), sr=SAMPLE_RATE, mono=True)
     if audio.shape[0] > CLIP_SAMPLES:
         audio = audio[:CLIP_SAMPLES]
-    # Peak normalize lightly — PaSST expects roughly [-1, 1].
+    # Peak normalize lightly — matches trainer.
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
     if peak > 1.0:
         audio = audio / peak
@@ -194,7 +140,7 @@ def load_mono_32k(filename: str | Path) -> np.ndarray:
 
 
 def _pad_clip(audio: np.ndarray) -> np.ndarray:
-    """Pad/trim to OpenMIC 10 s so positional encodings match the checkpoint."""
+    """Pad/trim to CLIP_SAMPLES so every input is exactly 10 s."""
     if audio.size == 0:
         return audio
     if audio.shape[0] < CLIP_SAMPLES:
@@ -204,58 +150,24 @@ def _pad_clip(audio: np.ndarray) -> np.ndarray:
     return audio
 
 
-class _PasstOpenmicBackend:
-    """PaSST OpenMIC-2018 via hear21passt (logits → sigmoid)."""
+class StemCnn6BackendOnnx:
+    """Raw-waveform → ONNX → 11-class probabilities.
 
-    name = "passt-openmic"
+    The ONNX graph embeds the full STFT + LogMel + CNN6 stack, so this backend
+    only needs to: stack clips into a batch, run the session, clip outputs to
+    [0, 1]. No mel frontend, no torch.
 
-    def __init__(self, model, device: str):
-        self.model = model
-        self.device = device
-
-    def predict(self, audio: np.ndarray) -> np.ndarray:
-        return self._predict_one(audio)
-
-    def _predict_one(self, audio: np.ndarray) -> np.ndarray:
-        import torch
-
-        if audio.size == 0:
-            return np.zeros(len(OPENMIC_INSTRUMENTS), dtype=np.float32)
-        audio = _pad_clip(audio)
-        tensor = torch.from_numpy(audio).unsqueeze(0).to(self.device)
-        self.model.eval()
-        with torch.no_grad():
-            logits = self.model.get_scene_embeddings(tensor)
-            if logits.ndim == 1:
-                logits = logits.unsqueeze(0)
-            probs = torch.sigmoid(logits).detach().float().cpu().numpy()[0]
-        return probs.astype(np.float32, copy=False)
-
-    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
-        """Sequential torch predict (no fused batch API on the wrapper)."""
-        if not audios:
-            return np.zeros((0, len(OPENMIC_INSTRUMENTS)), dtype=np.float32)
-        return np.stack([self._predict_one(a) for a in audios], axis=0)
-
-
-class _PasstOpenmicBackendOnnx:
-    """ONNX Runtime drop-in for _PasstOpenmicBackend.
-
-    Same public API (``predict`` / ``predict_batch`` / ``name`` / ``device``).
-    Mel is numpy (``passt_mel_np``); the ViT net is the ONNX graph — no
-    hear21passt/torch.
+    Public API mirrors the old PaSST backend (``predict`` / ``predict_batch`` /
+    ``name`` / ``device``) so ``instrument_enrich.py`` is unchanged.
     """
 
-    name = "passt-openmic"
+    name = "stem-cnn6"
 
     def __init__(self, onnx_path: Path, device: str = ""):
         try:
             from ort_util import create_ort_session
         except ImportError:
-            import sys
-            from pathlib import Path as _P
-
-            root = _P(__file__).resolve().parent.parent
+            root = Path(__file__).resolve().parent.parent
             if str(root) not in sys.path:
                 sys.path.insert(0, str(root))
             from ort_util import create_ort_session
@@ -276,15 +188,15 @@ class _PasstOpenmicBackendOnnx:
         return self.predict_batch([audio])[0]
 
     def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
-        """Batch mel + one ORT ``session.run``. Returns (N, 20) float32."""
-        try:
-            from passt_mel_np import passt_mel_numpy
-        except ImportError:
-            from instrument_tagger.passt_mel_np import passt_mel_numpy
+        """Batch raw waveforms into shared ONNX calls. Returns (N, 11) float32.
 
+        Pools all clips into sub-batches capped at ``MAX_ONNX_BATCH`` so peak
+        memory stays bounded. Empty/None clips are fed zeros and their output
+        rows are zeroed afterwards (no valid prediction for silence).
+        """
         n = len(audios)
         if n == 0:
-            return np.zeros((0, len(OPENMIC_INSTRUMENTS)), dtype=np.float32)
+            return np.zeros((0, N_CLASSES), dtype=np.float32)
         clips: list[np.ndarray] = []
         empty_idx: list[int] = []
         for i, audio in enumerate(audios):
@@ -293,25 +205,28 @@ class _PasstOpenmicBackendOnnx:
                 clips.append(np.zeros(CLIP_SAMPLES, dtype=np.float32))
             else:
                 clips.append(_pad_clip(np.asarray(audio, dtype=np.float32)))
-        stacked = np.stack(clips, axis=0)
-        mel = passt_mel_numpy(stacked)  # (N, 128, 998)
-        mel_in = np.ascontiguousarray(mel[:, None, :, :], dtype=np.float32)
-        logits = self.session.run(["logits"], {"mel": mel_in})[0]
-        probs = (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+
+        out_rows: list[np.ndarray] = []
+        for start in range(0, n, MAX_ONNX_BATCH):
+            sub = clips[start : start + MAX_ONNX_BATCH]
+            inp = np.stack(sub, axis=0)  # (b, CLIP_SAMPLES) raw waveform
+            probs = self.session.run(["probs"], {"audio": inp})[0]
+            out_rows.append(np.clip(probs, 0.0, 1.0).astype(np.float32))
+        out = np.concatenate(out_rows, axis=0) if out_rows else np.zeros((0, N_CLASSES), dtype=np.float32)
         for i in empty_idx:
-            probs[i] = 0.0
-        return probs
+            out[i] = 0.0
+        return out
 
 
-def _passt_batch_size() -> int:
-    raw = os.environ.get("PASST_BATCH_SIZE", "8").strip()
+def _batch_size() -> int:
+    raw = os.environ.get("PASST_BATCH_SIZE", "16").strip()
     try:
         return max(1, int(raw))
     except ValueError:
-        return 8
+        return 16
 
 
-def _passt_audio_workers() -> int:
+def _audio_workers() -> int:
     raw = os.environ.get("PASST_AUDIO_WORKERS", "2").strip()
     try:
         return max(1, min(8, int(raw)))
@@ -319,11 +234,20 @@ def _passt_audio_workers() -> int:
         return 2
 
 
-def _resolve_passt_onnx() -> Path | None:
-    """Prefer bundled ``models/passt_openmic.onnx``, then spike export path."""
+# Back-compat aliases — instrument_enrich.py imports these names.
+_passt_batch_size = _batch_size
+_passt_audio_workers = _audio_workers
+
+
+def _resolve_onnx() -> Path | None:
+    """Resolve the Stem CNN6 ONNX weight. Returns None if not present.
+
+    The model file is not bundled in source control; it is either built
+    locally (place at models/stem_cnn6.onnx) or downloaded
+    by the installer into the same path.
+    """
     candidates = [
-        MODEL_DIR / "passt_openmic.onnx",
-        HERE.parent / "_onnx_spike" / "onnx_out" / "passt_openmic.onnx",
+        MODEL_DIR / ONNX_FILENAME,
     ]
     for path in candidates:
         if path.is_file():
@@ -331,122 +255,30 @@ def _resolve_passt_onnx() -> Path | None:
     return None
 
 
-def load_backend(status=_status) -> _PasstOpenmicBackend | _PasstOpenmicBackendOnnx:
-    """Load PaSST OpenMIC — ONNX by default (STEM_ONNX), torch fallback."""
-    if os.environ.get("STEM_ONNX", "1").strip() != "0":
-        onnx_path = _resolve_passt_onnx()
-        if onnx_path is not None:
-            try:
-                import onnxruntime  # noqa: F401
-            except ImportError:
-                pass
-            else:
-                status(f"  loading PaSST OpenMIC (onnxruntime)...")
-                backend = _PasstOpenmicBackendOnnx(onnx_path, device="")
-                status(f"  device: {backend.device}")
-                try:
-                    backend.predict(np.zeros(CLIP_SAMPLES, dtype=np.float32))
-                except Exception:
-                    pass
-                return backend
+def load_backend(status=_status) -> StemCnn6BackendOnnx:
+    """Load Stem CNN6 ONNX. Raises SystemExit with a helpful message if absent.
 
-    import torch
-
-    try:
-        from hear21passt.models.passt import get_model as get_model_passt
-        from hear21passt.wrapper import PasstBasicWrapper
-        # hear21passt prints tensor shapes on first forward — silence that spam.
-        import hear21passt.models.passt as _passt_mod
-
-        _passt_mod.first_RUN = False
-    except ImportError as exc:
-        sites: list[Path] = []
-        explicit = os.environ.get("STEM_SITE_PACKAGES", "").strip()
-        if explicit:
-            sites.append(Path(explicit))
-        here = Path(__file__).resolve().parent
-        for folder in (here.parent, *here.parents):
-            if folder.name.lower() == "_internal":
-                continue
-            sites.append(folder / "site-packages")
-            if any(
-                (folder / name).is_file()
-                for name in (
-                    "STEM-organizer.exe",
-                    "stem-organizer.exe",
-                    "STEM_organizer.exe",
-                )
-            ):
-                break
-        # Dedupe while preserving order
-        seen: set[str] = set()
-        uniq_sites: list[Path] = []
-        for site in sites:
-            key = str(site)
-            if key in seen:
-                continue
-            seen.add(key)
-            uniq_sites.append(site)
-
-        passt_dirs = [s / "hear21passt" for s in uniq_sites]
-        present = [p for p in passt_dirs if p.is_dir()]
-        pkg_missing = "hear21passt" in str(exc) or not present
-        if pkg_missing and not present:
-            headline = "ERROR: hear21passt not installed."
-        else:
-            # Dependency of hear21passt failed (e.g. timm) — do not mislabel.
-            headline = (
-                f"ERROR: hear21passt import failed ({type(exc).__name__}: {exc})."
-            )
-        look_lines = "\n".join(
-            f"    {p} ({'present' if p.is_dir() else 'MISSING'})" for p in passt_dirs[:4]
-        ) or "    (none)"
+    The old PaSST runner had a torch/hear21passt fallback here; the Stem CNN6
+    is ONNX-only (its frontend is baked into the graph), so there is no
+    fallback path — onnxruntime is the only backend.
+    """
+    onnx_path = _resolve_onnx()
+    if onnx_path is None:
         raise SystemExit(
-            f"\n{headline}\n"
-            "  Frozen build: run install-deps.bat beside STEM-organizer.exe\n"
-            "    (must create site-packages\\hear21passt\\).\n"
-            "  From source: run instrument_tagger\\install-deps.bat\n"
-            "    (or root install-deps.bat).\n"
-            f"  python: {sys.executable}\n"
-            f"  PYTHONPATH: {os.environ.get('PYTHONPATH', '') or '(empty)'}\n"
-            f"  STEM_SITE_PACKAGES: "
-            f"{os.environ.get('STEM_SITE_PACKAGES', '') or '(empty)'}\n"
-            f"  looked for hear21passt:\n{look_lines}\n"
-            f"  sys.path[0:5]: {sys.path[:5]!r}\n"
-            f"  detail: {exc!r}\n"
-        ) from exc
-
-    # Local mel (no torchaudio) — GG venv often has broken torchaudio wheels.
-    from passt_mel import PasstMelSTFT
-
-    status("  loading PaSST OpenMIC-2018 (first run downloads ~330 MB)...")
-    mel = PasstMelSTFT(
-        n_mels=128,
-        sr=SAMPLE_RATE,
-        win_length=800,
-        hopsize=320,
-        n_fft=1024,
-        fmin=0.0,
-        fmax=None,
-    )
-    # hear21passt openmic2008.py used arch="openmic2008" (broken);
-    # correct arch key is "openmic". Silence get_model's print(model) spam.
-    with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        net = get_model_passt(arch="openmic", n_classes=20)
-    model = PasstBasicWrapper(
-        mel=mel,
-        net=net,
-        mode="logits",
-        scene_embedding_size=20,
-        timestamp_embedding_size=20,
-        max_model_window=10000,
-    )
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-    model.eval()
-    status(f"  device: {device}")
-    return _PasstOpenmicBackend(model, device)
+            f"ERROR: Stem CNN6 ONNX weight not found.\n"
+            f"  Expected at: {MODEL_DIR / ONNX_FILENAME}\n"
+            f"  Place the exported stem_cnn6.onnx there (export from the\n"
+            f"  train-vocal-classifier project, or restore via the installer).\n"
+        )
+    status("  loading Stem CNN6 (onnxruntime)...")
+    backend = StemCnn6BackendOnnx(onnx_path, device="")
+    status(f"  device: {backend.device}")
+    # Warm up the session so the first real predict isn't slow.
+    try:
+        backend.predict(np.zeros(CLIP_SAMPLES, dtype=np.float32))
+    except Exception:
+        pass
+    return backend
 
 
 def probs_to_result(
@@ -455,59 +287,51 @@ def probs_to_result(
     top_k: int = 5,
     threshold: float = 0.0,
 ) -> dict:
-    """
-    Sigmoid multi-label scores → primary label + top-k list.
+    """11-class softmax probabilities → primary label + top-k list.
 
-    Bias: OpenMIC ``synthesizer`` is a loose electronic bucket. If it is
-    argmax *and* the runner-up raw score is within SYNTH_DEMOTE_MAX_GAP,
-    use the runner-up instead. Clear synth wins stay synthesizer.
-    ``top`` still lists raw scores (synth may appear first there).
+    Unlike the old PaSST runner there is no synth-demote hack: the model's
+    softmax already produces a single clean distribution over mutually
+    exclusive classes, so argmax is the correct primary label.
     """
     order = np.argsort(-probs)
     best_i = int(order[0])
-    demoted_synth = False
-    if OPENMIC_INSTRUMENTS[best_i] == "synthesizer" and order.size > 1:
-        runner_i = int(order[1])
-        gap = float(probs[best_i]) - float(probs[runner_i])
-        if gap <= SYNTH_DEMOTE_MAX_GAP:
-            best_i = runner_i
-            demoted_synth = True
 
     top = []
     for i in order[: max(1, top_k)]:
         score = float(probs[i])
         if score < threshold and top:
             break
-        top.append([OPENMIC_INSTRUMENTS[int(i)], score])
+        top.append([STEM_CLASSES[int(i)], score])
 
     above = [
-        [OPENMIC_INSTRUMENTS[int(i)], float(probs[i])]
+        [STEM_CLASSES[int(i)], float(probs[i])]
         for i in order
         if float(probs[i]) >= threshold
     ]
 
-    # Confidence: chosen label vs strongest other (often synthesizer after demote).
     p1 = float(probs[best_i])
     others = [int(i) for i in order if int(i) != best_i]
     p2 = float(probs[others[0]]) if others else 0.0
-    denom = p1 + p2
-    calibrated = (p1 / denom) if denom > 0 else p1
 
     return {
-        "label": OPENMIC_INSTRUMENTS[best_i],
-        "score": float(calibrated),
+        "label": STEM_CLASSES[best_i],
+        "score": p1,
         "score_raw": p1,
         "top": top,
         "above": above,
         "n_patches": 1,
-        "model": "passt-openmic",
-        "demoted_synth": demoted_synth,
+        "model": "stem-cnn6",
+        # Field kept for cache/back-compat shape parity with the old PaSST
+        # result; always False under this model.
+        "demoted_synth": False,
+        # Margin vs runner-up — handy for confidence gating downstream.
+        "second_score": p2,
     }
 
 
 def classify_file(
     filename: str | Path,
-    backend: _PasstOpenmicBackend,
+    backend: StemCnn6BackendOnnx,
     *,
     top_k: int = 5,
     threshold: float = 0.0,
@@ -527,7 +351,7 @@ def iter_audio_files(folder: Path):
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Classify audio with PaSST OpenMIC-2018 instruments.",
+        description="Classify audio with Stem CNN6 (11-class instruments).",
     )
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--file", type=Path, help="Single audio file")
@@ -547,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
         "--threshold",
         type=float,
         default=0.0,
-        help="Min raw sigmoid for above[] list (default 0)",
+        help="Min softmax score for above[] list (default 0)",
     )
     parser.add_argument(
         "--limit",
@@ -597,10 +421,10 @@ def main(argv: list[str] | None = None) -> int:
             _status(f"ERROR: no audio files under {args.folder}")
             return 1
 
-    _status(f"Instrument tagger (PaSST OpenMIC) — {len(files)} file(s)")
+    _status(f"Instrument tagger (Stem CNN6) — {len(files)} file(s)")
     backend = load_backend(status=_status)
-    batch_size = _passt_batch_size()
-    audio_workers = _passt_audio_workers()
+    batch_size = _batch_size()
+    audio_workers = _audio_workers()
     _status(f"  backend: {backend.name}")
     _status(f"  batch={batch_size} decode_workers={audio_workers}")
     _status("")

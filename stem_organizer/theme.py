@@ -79,12 +79,19 @@ DARK = {
 STEM_COLORS = {
     "bass":         "#ef4444",
     "drums":        "#f59e0b",
+    "flute":        "#1d7e64",
+    "fx":           "#000000",
+    "guitar":       "#C1090B",
+    "keys":         "#485fab",
+    "organ":        "#996e10",
     "other":        "#10b981",
+    "piano":        COLORS["log_fg"],  # #d6dae8 — same fill as dry badge
+    "strings":      "#76c043",
+    "synth":        "#10b981",
     "vocals":       "#a855f7",
+    "wind":         "#00b8d3",
     "acapella":     "#a855f7",
     "vocal":        "#a855f7",
-    "guitar":       "#376FAC",
-    "piano":        COLORS["log_fg"],  # #d6dae8 — same fill as dry badge
     "instrumental": "#60A5FA",
     "original":     "#9aa0b4",
     "mixture":      "#9aa0b4",

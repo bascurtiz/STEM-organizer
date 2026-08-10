@@ -80,6 +80,11 @@ _SAMPLE_FMT_TO_SUBTYPE = {
 }
 
 
+class _FfmpegUnsupported(Exception):
+    """Raised when the ffmpeg fast path cannot handle the source."""
+    pass
+
+
 def _ffmpeg_tools() -> tuple[str, str]:
     """Return (ffmpeg, ffprobe), downloading a real build once when missing."""
     from ffmpeg_bootstrap import ensure_ffmpeg
@@ -378,6 +383,115 @@ def resample_audio(data: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     return np.stack(cols, axis=1)
 
 
+
+def _process_file_ffmpeg(
+    src: Path,
+    dst: Path,
+    *,
+    headroom_db: float,
+    dither: bool,
+    target_samplerate: int,
+    target_channels: int = 2,
+) -> dict:
+    """ffmpeg fast path for integer-PCM sources (<=24-bit, <=2ch, no reduction).
+
+    Raises _FfmpegUnsupported for float/double/lossy/s32/>2ch sources — the
+    caller falls through to the original numpy pipeline (which handles
+    reduction, dither, and gain-reduction for float overs).
+
+    Returns the same dict shape as ``process_file``.
+    """
+    import subprocess
+    from ffmpeg_bootstrap import subprocess_kwargs
+
+    ffmpeg, ffprobe = _ffmpeg_tools()
+    sr, channels, subtype = _probe_audio(src, ffprobe)
+    if channels > 2:
+        raise _FfmpegUnsupported(f"{channels}ch source")
+
+    is_float = subtype in FLOAT_SUBTYPES
+    lossy = src.suffix.lower() in LOSSY_EXTS
+    source_bits = SUBTYPE_BITS.get(subtype, 16)
+    bit_depth = target_bit_depth(subtype)
+    is_reduction = source_bits > bit_depth
+
+    # ffmpeg path only handles integer-PCM at <=24-bit with no reduction.
+    if is_float or lossy or is_reduction or bit_depth not in (16, 24):
+        raise _FfmpegUnsupported(f"{subtype} to {bit_depth}-bit (needs reduction/dither)")
+
+    # Build action string (mirrors numpy path).
+    if lossy:
+        action = f"decoded {src.suffix.lower()} to {bit_depth}-bit FLAC"
+    else:
+        action = f"lossless re-encode ({subtype} to {bit_depth}-bit)"
+
+    if int(sr) != int(target_samplerate):
+        action += f"; resampled {int(sr)} to {int(target_samplerate)} Hz"
+
+    if channels != int(target_channels):
+        ch_label = "mono" if int(target_channels) == 1 else "stereo"
+        if channels == 1:
+            action += f"; mono to {ch_label} (duplicated)"
+        else:
+            action += f"; {channels}ch to {ch_label}"
+
+    # Build ffmpeg command.
+    sample_fmt = "s16" if bit_depth == 16 else "s32"
+    args = [
+        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(src),
+    ]
+    # Resample + channel + format conversion in one aresample filter.
+    # No dither here (integer-to-integer, no reduction; dither method=none).
+    # compression_level 5 matches libsndfile's default.
+    args += [
+        "-af", f"aresample=osr={int(target_samplerate)}:osf={sample_fmt}",
+        "-ac", str(int(target_channels)),
+        "-c:a", "flac", "-compression_level", "5",
+    ]
+    if bit_depth == 24:
+        args += ["-bits_per_raw_sample", "24"]
+    args.append(str(dst))
+
+    try:
+        subprocess.run(args, check=True, capture_output=True, **subprocess_kwargs())
+    except subprocess.CalledProcessError as exc:
+        raise _FfmpegUnsupported(f"ffmpeg encode failed: {exc}") from exc
+
+    # Verify output is what we expect.
+    import soundfile as sf
+    try:
+        info = sf.info(str(dst))
+        if info.samplerate != int(target_samplerate) or info.channels != int(target_channels):
+            raise _FfmpegUnsupported(
+                f"output mismatch: {info.samplerate}/{info.channels} "
+                f"vs expected {target_samplerate}/{target_channels}"
+            )
+    except Exception as exc:
+        raise _FfmpegUnsupported(f"output verify failed: {exc}") from exc
+
+    # Copy metadata (same as numpy path).
+    try:
+        from ..meta_tags import copy_tags_to_flac
+        if copy_tags_to_flac(src, dst):
+            action += "; metadata copied"
+        else:
+            action += "; metadata not copied"
+    except Exception as exc:
+        action += f"; metadata copy failed ({exc})"
+
+    return {
+        "file": str(src),
+        "source_subtype": subtype,
+        "peak_dbfs": "",
+        "gain_db": "0.00",
+        "action": action,
+        "output_bit_depth": bit_depth,
+        "status": "ok",
+    }
+
+
+
 def process_file(
     src: Path,
     dst: Path,
@@ -387,6 +501,21 @@ def process_file(
     target_samplerate: int,
     target_channels: int = 2,
 ) -> dict:
+    # Try ffmpeg fast path for integer-PCM sources (no reduction/dither).
+    # Falls back to the proven numpy pipeline on any unsupported case.
+    try:
+        return _process_file_ffmpeg(
+            src,
+            dst,
+            headroom_db=headroom_db,
+            dither=dither,
+            target_samplerate=target_samplerate,
+            target_channels=target_channels,
+        )
+    except _FfmpegUnsupported:
+        pass
+    # Original numpy pipeline below.
+
     import soundfile as sf
 
     data, sr, subtype = load_audio(src)

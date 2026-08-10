@@ -418,30 +418,36 @@ def spectrogram(
     num_frames = int(1 + np.floor((waveform.size - frame_length) / hop_length))
 
     num_frequency_bins = (fft_length // 2) + 1 if onesided else fft_length
-    spectrogram = np.empty((num_frames, num_frequency_bins), dtype=np.complex64)
 
     # rfft is faster than fft
     fft_func = np.fft.rfft if onesided else np.fft.fft
-    buffer = np.zeros(fft_length)
 
-    timestep = 0
-    for frame_idx in range(num_frames):
-        buffer[:frame_length] = waveform[timestep : timestep + frame_length]
+    if num_frames <= 0:
+        spectrogram = np.empty((0, num_frequency_bins), dtype=np.complex64)
+    else:
+        # Vectorized frame split: the original Python loop stacked
+        # waveform[t : t + frame_length] for t = i * hop_length and ran a
+        # 1D FFT per frame. A batched FFT over the last axis executes the
+        # same per-row 1D transforms, so the output is identical.
+        starts = hop_length * np.arange(num_frames)
+        idx = starts[:, None] + np.arange(frame_length)[None, :]
+        buffer = np.zeros((num_frames, fft_length), dtype=np.float64)
+        frames = buffer[:, :frame_length]
+        frames[:] = waveform[idx]
 
         if dither != 0.0:
-            buffer[:frame_length] += dither * np.random.randn(frame_length)
+            frames[:] += dither * np.random.randn(num_frames, frame_length)
 
         if remove_dc_offset:
-            buffer[:frame_length] = buffer[:frame_length] - buffer[:frame_length].mean()
+            frames[:] -= frames.mean(axis=1, keepdims=True)
 
         if preemphasis is not None:
-            buffer[1:frame_length] -= preemphasis * buffer[: frame_length - 1]
-            buffer[0] *= 1 - preemphasis
+            frames[:, 1:] -= preemphasis * frames[:, :-1]
+            frames[:, 0] *= 1 - preemphasis
 
-        buffer[:frame_length] *= window
+        frames[:] *= window
 
-        spectrogram[frame_idx] = fft_func(buffer)
-        timestep += hop_length
+        spectrogram = fft_func(buffer, axis=-1).astype(np.complex64)
 
     # note: ** is much faster than np.power
     if power is not None:

@@ -42,11 +42,13 @@ _AUDIO_EXTS = frozenset(
 
 
 def _default_checkpoint() -> Path:
-    """Prefer ONNX weight; fall back to legacy .pt name for resolve logic."""
-    onnx = _HERE / "checkpoints" / "nf50-q05-221125.onnx"
+    """Prefer ONNX weight; fall back to legacy .pt name for resolve logic.
+    Single model source: the root models/ folder."""
+    root = _HERE.parent / "models"
+    onnx = root / "nf50-q05-221125.onnx"
     if onnx.is_file():
         return onnx
-    return _HERE / "checkpoints" / "nf50-q05-221125.pt"
+    return root / "nf50-q05-221125.pt"
 
 
 def _read_files_from(path: Path) -> list[Path]:

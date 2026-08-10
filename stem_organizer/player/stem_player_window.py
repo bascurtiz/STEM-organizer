@@ -1,4 +1,4 @@
-﻿"""Stem player window — port of stem_player.StemPlayerWindow.
+"""Stem player window — port of stem_player.StemPlayerWindow.
 
 Non-modal QWidget. Header (Load / title / time / transport / master volume /
 meter), timeline + per-track rows (S / M / volume / waveform), and a
@@ -96,10 +96,17 @@ WAVEFORM_DIM_BLEND = 0.68
 STEM_COLORS = {
     "bass": "#ef4444",
     "drums": "#f59e0b",
+    "flute": "#1d7e64",
+    "fx": "#d6dae8",  # white-ish (same as playerbar FX)
+    "guitar": "#C1090B",
+    "keys": "#485fab",
+    "organ": "#996e10",
     "other": "#10b981",
+    "piano": "#d6dae8",
+    "strings": "#76c043",
+    "synth": "#10b981",
     "vocals": "#a855f7",
-    "guitar": "#376FAC",
-    "piano": "#d6dae8",  # same off-white as dry badge bg
+    "wind": "#00b8d3",
     "instrumental": "#60A5FA",
     "acapella": "#a855f7",
     "original": "#7c5cff",

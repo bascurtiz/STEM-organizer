@@ -50,6 +50,12 @@ class StartupWorker(QThread):
             import classify_backend
 
             classify_backend._init_ml()
+            # Warm the ORT CUDA context with a tiny session (~0.1 s). The full
+            # HTDemucs session is created lazily on the first SI-SDR run —
+            # with the context pre-warmed it loads in ~5 s instead of ~17 s,
+            # and startup no longer blocks on it.
+            self.status.emit("Warming GPU…")
+            classify_backend.warm_cuda_context()
             self.status.emit("Preparing interface…")
             time.sleep(0.15)
         except Exception as exc:

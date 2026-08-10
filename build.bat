@@ -94,6 +94,25 @@ if errorlevel 1 (
     exit /b 1
 )
 "%PY%" --version
+REM Pre-freeze gate: the genre/gender tagger must import cleanly (no CLI run),
+REM resolve its models, and pass its unittest suite before the slow PyInstaller
+REM step. Model-backed tests skip when models are absent - the dist sanity
+REM checks below still enforce their presence.
+REM Test detail goes to a temp log (declutters the build output); only the
+REM summary prints on success, and failures are echoed with their tracebacks.
+echo   Running genre_gender_tagger unittest suite ^(pre-freeze gate^) ...
+"%PY%" -X utf8 genre_gender_tagger\test_genre_gender_tagger.py > _gate_test.log 2>&1
+if errorlevel 1 (
+    echo ERROR: genre_gender_tagger test suite FAILED - aborting build.
+    echo.
+    type _gate_test.log
+    echo.
+    echo   Full log kept at _gate_test.log
+    pause
+    exit /b 1
+)
+del /Q _gate_test.log >nul 2>&1
+echo   Test suite OK.
 echo   Ready.
 echo.
 
@@ -120,9 +139,9 @@ copy /Y install-deps.bat "%OUT%\install-deps.bat" >nul
 copy /Y python-version.txt "%OUT%\python-version.txt" >nul
 if exist requirements.txt copy /Y requirements.txt "%OUT%\requirements.txt" >nul
 if exist demucs_onnx.py copy /Y demucs_onnx.py "%OUT%\demucs_onnx.py" >nul
-if exist vocal_classifier_onnx.py copy /Y vocal_classifier_onnx.py "%OUT%\vocal_classifier_onnx.py" >nul
+if exist stem_cnn6_onnx.py copy /Y stem_cnn6_onnx.py "%OUT%\stem_cnn6_onnx.py" >nul
 if exist ort_util.py copy /Y ort_util.py "%OUT%\ort_util.py" >nul
-REM HTDemucs + Vocal CNN6 weights (UMX-L / X-UMXL / SCNet Tran retired).
+REM HTDemucs weights (UMX-L / X-UMXL / SCNet Tran retired).
 if not exist "%OUT%\models" mkdir "%OUT%\models" >nul
 REM Prefer dynbatch graph as htdemucs.onnx (Classify file-batch); fall back to StemSplit B=1.
 if exist "models\htdemucs.batch.onnx" (
@@ -130,13 +149,22 @@ if exist "models\htdemucs.batch.onnx" (
 ) else if exist "models\htdemucs.onnx" (
     copy /Y "models\htdemucs.onnx" "%OUT%\models\htdemucs.onnx" >nul
 )
-REM Vocal CNN6 classifier ONNX (trained on user data, ~24 MB).
-if exist "models\vocal_classifier.onnx" copy /Y "models\vocal_classifier.onnx" "%OUT%\models\" >nul
+
+echo   Copying shared models\ ^(single source for all features^) ...
+if exist "models\stem_cnn6.onnx" copy /Y "models\stem_cnn6.onnx" "%OUT%\models\" >nul
+if exist "models\cnn14.onnx" copy /Y "models\cnn14.onnx" "%OUT%\models\" >nul
+if exist "models\class_labels_indices.csv" copy /Y "models\class_labels_indices.csv" "%OUT%\models\" >nul
+if exist "models\maest_discogs519.onnx" copy /Y "models\maest_discogs519.onnx" "%OUT%\models\" >nul
+if exist "models\maest_discogs519.id2label.json" copy /Y "models\maest_discogs519.id2label.json" "%OUT%\models\" >nul
+if exist "models\discogs-effnet-bsdynamic-1.onnx" copy /Y "models\discogs-effnet-bsdynamic-1.onnx" "%OUT%\models\" >nul
+if exist "models\gender-discogs-effnet-1.onnx" copy /Y "models\gender-discogs-effnet-1.onnx" "%OUT%\models\" >nul
+if exist "models\vocal_reverb.onnx" copy /Y "models\vocal_reverb.onnx" "%OUT%\models\" >nul
+if exist "models\vocal_reverb.config.json" copy /Y "models\vocal_reverb.config.json" "%OUT%\models\" >nul
+if exist "models\nf50-q05-221125.onnx" copy /Y "models\nf50-q05-221125.onnx" "%OUT%\models\" >nul
 
 echo   Copying genre_gender_tagger\ ^(bundled tagger, no venv^) ...
 if exist "%OUT%\genre_gender_tagger" rmdir /S /Q "%OUT%\genre_gender_tagger"
 mkdir "%OUT%\genre_gender_tagger" >nul
-mkdir "%OUT%\genre_gender_tagger\models" >nul
 copy /Y "genre_gender_tagger\genre_gender_tagger.py" "%OUT%\genre_gender_tagger\" >nul
 if exist "genre_gender_tagger\vocal_reverb.py" copy /Y "genre_gender_tagger\vocal_reverb.py" "%OUT%\genre_gender_tagger\" >nul
 if exist "genre_gender_tagger\file_writable.py" copy /Y "genre_gender_tagger\file_writable.py" "%OUT%\genre_gender_tagger\" >nul
@@ -147,38 +175,25 @@ if exist "genre_gender_tagger\install-deps.bat" copy /Y "genre_gender_tagger\ins
 if exist "genre_gender_tagger\run.bat" copy /Y "genre_gender_tagger\run.bat" "%OUT%\genre_gender_tagger\" >nul
 if exist "genre_gender_tagger\requirements.txt" copy /Y "genre_gender_tagger\requirements.txt" "%OUT%\genre_gender_tagger\" >nul
 if exist "genre_gender_tagger\readme.md" copy /Y "genre_gender_tagger\readme.md" "%OUT%\genre_gender_tagger\" >nul
-if exist "genre_gender_tagger\models\*.onnx" copy /Y "genre_gender_tagger\models\*.onnx" "%OUT%\genre_gender_tagger\models\" >nul
-REM ONNX weights + config sidecars (vocal_reverb .pt / MAEST HF weights not shipped).
-if exist "genre_gender_tagger\models\vocal_reverb.config.json" copy /Y "genre_gender_tagger\models\vocal_reverb.config.json" "%OUT%\genre_gender_tagger\models\" >nul
-if exist "genre_gender_tagger\models\maest_discogs519.id2label.json" copy /Y "genre_gender_tagger\models\maest_discogs519.id2label.json" "%OUT%\genre_gender_tagger\models\" >nul
+REM ONNX weights now live in the shared models\ folder (single source).
 
 echo   Copying instrument_tagger\ ^(Rename Auto-detect, no venv^) ...
 if exist "%OUT%\instrument_tagger" rmdir /S /Q "%OUT%\instrument_tagger"
 mkdir "%OUT%\instrument_tagger" >nul
-mkdir "%OUT%\instrument_tagger\models" >nul
 copy /Y "instrument_tagger\instrument_tagger.py" "%OUT%\instrument_tagger\" >nul
-if exist "instrument_tagger\passt_mel.py" copy /Y "instrument_tagger\passt_mel.py" "%OUT%\instrument_tagger\" >nul
-if exist "instrument_tagger\passt_mel_np.py" copy /Y "instrument_tagger\passt_mel_np.py" "%OUT%\instrument_tagger\" >nul
-if exist "instrument_tagger\install-deps.bat" copy /Y "instrument_tagger\install-deps.bat" "%OUT%\instrument_tagger\" >nul
-REM Phase 2 ONNX weight (PaSST OpenMIC - hear21passt .pt is not shipped).
-if exist "instrument_tagger\models\*.onnx" copy /Y "instrument_tagger\models\*.onnx" "%OUT%\instrument_tagger\models\" >nul
 
 echo   Copying panns_tagger\ ^(AudioSet Cnn14, no venv^) ...
 if exist "%OUT%\panns_tagger" rmdir /S /Q "%OUT%\panns_tagger"
 mkdir "%OUT%\panns_tagger" >nul
-mkdir "%OUT%\panns_tagger\models" >nul
 copy /Y "panns_tagger\panns_tagger.py" "%OUT%\panns_tagger\" >nul
 if exist "panns_tagger\file_writable.py" copy /Y "panns_tagger\file_writable.py" "%OUT%\panns_tagger\" >nul
 if exist "panns_tagger\install-deps.bat" copy /Y "panns_tagger\install-deps.bat" "%OUT%\panns_tagger\" >nul
 if exist "panns_tagger\readme.md" copy /Y "panns_tagger\readme.md" "%OUT%\panns_tagger\" >nul
-REM ONNX weight + AudioSet labels CSV (Cnn14 .pth is gone - ONNX is the only weight).
-if exist "panns_tagger\models\*.onnx" copy /Y "panns_tagger\models\*.onnx" "%OUT%\panns_tagger\models\" >nul
-if exist "panns_tagger\models\class_labels_indices.csv" copy /Y "panns_tagger\models\class_labels_indices.csv" "%OUT%\panns_tagger\models\" >nul
+REM ONNX weights now live in the shared models\ folder (single source).
 
 echo   Copying key_tagger\ ^(Key Detect, no venv^) ...
 if exist "%OUT%\key_tagger" rmdir /S /Q "%OUT%\key_tagger"
 mkdir "%OUT%\key_tagger" >nul
-mkdir "%OUT%\key_tagger\checkpoints" >nul
 copy /Y "key_tagger\key_tagger.py" "%OUT%\key_tagger\" >nul
 if exist "key_tagger\inference.py" copy /Y "key_tagger\inference.py" "%OUT%\key_tagger\" >nul
 if exist "key_tagger\keys.py" copy /Y "key_tagger\keys.py" "%OUT%\key_tagger\" >nul
@@ -186,8 +201,19 @@ if exist "key_tagger\model.py" copy /Y "key_tagger\model.py" "%OUT%\key_tagger\"
 if exist "key_tagger\log_pace.py" copy /Y "key_tagger\log_pace.py" "%OUT%\key_tagger\" >nul
 if exist "key_tagger\install-deps.bat" copy /Y "key_tagger\install-deps.bat" "%OUT%\key_tagger\" >nul
 if exist "key_tagger\requirements.txt" copy /Y "key_tagger\requirements.txt" "%OUT%\key_tagger\" >nul
-REM ONNX weight (nf50 .pt is gone - ONNX is the only weight).
-if exist "key_tagger\checkpoints\*.onnx" copy /Y "key_tagger\checkpoints\*.onnx" "%OUT%\key_tagger\checkpoints\" >nul
+REM ONNX weight now lives in the shared models\ folder (single source).
+
+echo   Trimming dead NVIDIA runtime DLLs ^(saves ~350 MB^) ...
+REM Measured against onnxruntime-gpu 1.26 (CUDA 12.8 build): the CUDA EP
+REM statically needs cublas/cublasLt/cudart/cudnn(+engines/ops/graph/heuristic)/cufft.
+REM These never load during real inference - attention-only cuDNN, JIT nvrtc,
+REM BLAS wrapper, and the TensorRT EP (no TensorRT libs are bundled anyway):
+if exist "%OUT%\_internal\nvidia\cudnn\bin\cudnn_adv64_9.dll" del /Q "%OUT%\_internal\nvidia\cudnn\bin\cudnn_adv64_9.dll" >nul
+if exist "%OUT%\_internal\nvidia\cudnn\bin\cudnn_ext64_9.dll" del /Q "%OUT%\_internal\nvidia\cudnn\bin\cudnn_ext64_9.dll" >nul
+if exist "%OUT%\_internal\nvidia\cuda_nvrtc\bin\nvrtc64_120_0.dll" del /Q "%OUT%\_internal\nvidia\cuda_nvrtc\bin\nvrtc64_120_0.dll" >nul
+if exist "%OUT%\_internal\nvidia\cuda_nvrtc\bin\nvrtc-builtins64_129.dll" del /Q "%OUT%\_internal\nvidia\cuda_nvrtc\bin\nvrtc-builtins64_129.dll" >nul
+if exist "%OUT%\_internal\nvidia\cublas\bin\nvblas64_12.dll" del /Q "%OUT%\_internal\nvidia\cublas\bin\nvblas64_12.dll" >nul
+if exist "%OUT%\_internal\onnxruntime\capi\onnxruntime_providers_tensorrt.dll" del /Q "%OUT%\_internal\onnxruntime\capi\onnxruntime_providers_tensorrt.dll" >nul
 
 if not exist "%OUT%\key_tagger\key_tagger.py" (
     echo ERROR: key_tagger\key_tagger.py missing from dist - Key Detect will not run.
@@ -203,44 +229,40 @@ if not exist "%OUT%\genre_gender_tagger\genre_gender_tagger.py" (
 )
 
 REM Phase 1 ONNX weights must ship with the build (.pth deleted; STEM_ONNX default).
-if not exist "%OUT%\genre_gender_tagger\models\vocal_reverb.onnx" (
+if not exist "%OUT%\models\vocal_reverb.onnx" (
     echo ERROR: vocal_reverb.onnx missing from dist - Gender reverb ONNX path will fail.
-    echo   Expected at: genre_gender_tagger\models\vocal_reverb.onnx
+    echo   Expected at: models\vocal_reverb.onnx
     goto failed
 )
-if not exist "%OUT%\genre_gender_tagger\models\vocal_reverb.config.json" (
+if not exist "%OUT%\models\vocal_reverb.config.json" (
     echo ERROR: vocal_reverb.config.json missing from dist - reverb ONNX needs the sidecar.
     goto failed
 )
-if not exist "%OUT%\key_tagger\checkpoints\nf50-q05-221125.onnx" (
+if not exist "%OUT%\models\nf50-q05-221125.onnx" (
     echo ERROR: nf50-q05-221125.onnx missing from dist - Key Detect ONNX path will fail.
-    echo   Expected at: key_tagger\checkpoints\nf50-q05-221125.onnx
+    echo   Expected at: models\nf50-q05-221125.onnx
     goto failed
 )
-if not exist "%OUT%\panns_tagger\models\cnn14.onnx" (
+if not exist "%OUT%\models\cnn14.onnx" (
     echo ERROR: cnn14.onnx missing from dist - Vocal type ONNX path will fail.
-    echo   Expected at: panns_tagger\models\cnn14.onnx
+    echo   Expected at: models\cnn14.onnx
     goto failed
 )
-if not exist "%OUT%\panns_tagger\models\class_labels_indices.csv" (
+if not exist "%OUT%\models\class_labels_indices.csv" (
     echo ERROR: class_labels_indices.csv missing from dist - PANNs labels required.
     goto failed
 )
-if not exist "%OUT%\instrument_tagger\passt_mel_np.py" (
-    echo ERROR: passt_mel_np.py missing from dist - PaSST ONNX mel frontend required.
+if not exist "%OUT%\models\stem_cnn6.onnx" (
+    echo ERROR: stem_cnn6.onnx missing from dist - Rename Auto-detect ONNX path will fail.
+    echo   Expected at: models\stem_cnn6.onnx
     goto failed
 )
-if not exist "%OUT%\instrument_tagger\models\passt_openmic.onnx" (
-    echo ERROR: passt_openmic.onnx missing from dist - Rename Auto-detect ONNX path will fail.
-    echo   Expected at: instrument_tagger\models\passt_openmic.onnx
-    goto failed
-)
-if not exist "%OUT%\genre_gender_tagger\models\maest_discogs519.onnx" (
+if not exist "%OUT%\models\maest_discogs519.onnx" (
     echo ERROR: maest_discogs519.onnx missing from dist - Genre MAEST ONNX path will fail.
-    echo   Expected at: genre_gender_tagger\models\maest_discogs519.onnx
+    echo   Expected at: models\maest_discogs519.onnx
     goto failed
 )
-if not exist "%OUT%\genre_gender_tagger\models\maest_discogs519.id2label.json" (
+if not exist "%OUT%\models\maest_discogs519.id2label.json" (
     echo ERROR: maest_discogs519.id2label.json missing from dist - MAEST labels required.
     goto failed
 )
@@ -252,8 +274,8 @@ if not exist "%OUT%\demucs_onnx.py" (
     echo ERROR: demucs_onnx.py missing from dist - Classify HTDemucs ONNX runner required.
     goto failed
 )
-if not exist "%OUT%\vocal_classifier_onnx.py" (
-    echo ERROR: vocal_classifier_onnx.py missing from dist - Classify Vocal CNN6 runner required.
+if not exist "%OUT%\stem_cnn6_onnx.py" (
+    echo ERROR: stem_cnn6_onnx.py missing from dist - Classify Stem CNN6 runner required.
     goto failed
 )
 if not exist "%OUT%\models\htdemucs.onnx" (
@@ -341,6 +363,25 @@ if errorlevel 1 goto tools_bad
 "%OUT%\mp3val\mp3val.exe" 2>&1 | findstr /I "MP3val" >nul
 if errorlevel 1 goto tools_bad
 echo   Bundled tools OK - all four run cleanly.
+
+REM ---------------------------------------------------------------------------
+REM Pre-ship smoke gate: unified codec + tagger smoke suite against the fresh
+REM dist (decode fallbacks, tag writes, pair matching). Missing local fixtures
+REM SKIP (not fail); any real failure aborts before the installer is compiled.
+REM Detail goes to _gate_smoke.log; only the summary prints on success.
+echo   Running pre-ship smoke gate ^(_smoke_all.py^) ...
+"%PY%" -X utf8 _smoke_all.py --app "%OUT%" --python "%PY%" > _gate_smoke.log 2>&1
+if errorlevel 1 (
+    echo ERROR: pre-ship smoke gate FAILED - aborting build.
+    echo.
+    type _gate_smoke.log
+    echo.
+    echo   Full log kept at _gate_smoke.log
+    pause
+    exit /b 1
+)
+del /Q _gate_smoke.log >nul 2>&1
+echo   Pre-ship smoke gate OK.
 
 echo.
 echo ========================================

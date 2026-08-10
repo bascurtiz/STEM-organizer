@@ -100,7 +100,8 @@ SAMPLE_RATE = 32000
 MAX_AUDIO_SECONDS = 30.0
 
 HERE = Path(__file__).resolve().parent
-MODEL_DIR = HERE / "models"
+# Single model source: the root models/ folder (beside the exe when frozen).
+MODEL_DIR = HERE.parent / "models"
 
 # Official assets (panns_inference uses wget for these — broken on Windows PATH).
 _LABELS_URL = (
@@ -153,6 +154,7 @@ AUDIO_EXTENSIONS = {
     ".flac",
     ".mp3",
     ".ogg",
+    ".opus",
     ".m4a",
     ".aac",
     ".aif",
@@ -401,20 +403,25 @@ def load_mono_32k(
     except Exception:
         max_src = None
 
-    data, sr = sf.read(
-        str(filename),
-        always_2d=True,
-        dtype="float32",
-        frames=max_src if max_src else -1,
-    )
-    audio = data.mean(axis=1)
-    if sr != SAMPLE_RATE:
-        audio = librosa.resample(
-            audio,
-            orig_sr=sr,
-            target_sr=SAMPLE_RATE,
-            res_type="soxr_hq",
+    try:
+        data, sr = sf.read(
+            str(filename),
+            always_2d=True,
+            dtype="float32",
+            frames=max_src if max_src else -1,
         )
+        audio = data.mean(axis=1)
+        if sr != SAMPLE_RATE:
+            audio = librosa.resample(
+                audio,
+                orig_sr=sr,
+                target_sr=SAMPLE_RATE,
+                res_type="soxr_hq",
+            )
+    except Exception:
+        # sf can't decode some codecs (m4a/aac/opus) — librosa/audioread uses
+        # ffmpeg (bundled app ffmpeg is on PATH).
+        audio, _ = librosa.load(str(filename), sr=SAMPLE_RATE, mono=True)
     if max_seconds > 0:
         cap = int(max_seconds * SAMPLE_RATE)
         if audio.shape[0] > cap:

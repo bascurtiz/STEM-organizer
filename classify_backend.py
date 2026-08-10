@@ -51,7 +51,7 @@ AUDIO_EXTS = ('.wav', '.mp3', '.flac', '.aif', '.aiff', '.ogg', '.m4a', '.opus')
 MODELS = {
     # Analysis-first separators + CUDA HTDemucs (AGENTS.md / CUDA ship path).
     # Keys = Model dropdown display labels; values = internal ids (unchanged).
-    'Vocal CNN6': 'vocal_cnn6',
+    'Stem CNN6': 'vocal_cnn6',
     'HTdemucs (demucs)': 'htdemucs',
 }
 
@@ -103,8 +103,10 @@ AMBIG_MODES = {
     'Skip the entire song':     'skip_song',
 }
 
-STEM_FILE_EXTS = ('.flac', '.wav', '.mp3')
-SDR_STEM_EXT_LABEL = 'flac/wav/mp3'
+# SDR stem-set scanning must see every format the rest of the app handles
+# (AUDIO_EXTS).  Previously ogg/m4a/opus/aiff stems were invisible to SI-SDR.
+STEM_FILE_EXTS = AUDIO_EXTS
+SDR_STEM_EXT_LABEL = '/'.join(ext.lstrip('.') for ext in STEM_FILE_EXTS)
 
 SDR_DEFAULT_THRESHOLDS = {
     'bass': 25,
@@ -192,12 +194,73 @@ def _init_ml() -> None:
     _ML_INITIALIZED = True
 
 
+_WARM_SESSION: object = None  # keep the CUDA context alive after the warm
+
+
+def warm_cuda_context() -> bool:
+    """Warm the ORT CUDA context with a tiny model (~0.1 s, no GIL stall).
+
+    Building the HTDemucs CUDA session costs ~17 s because ORT lazily
+    initializes the CUDA runtime, cuDNN and cuBLAS handles on the process's
+    first CUDA session. Creating a small session first (any small ONNX in
+    models\) absorbs that one-time init, so the HTDemucs session later loads
+    in ~5 s — the model load itself. The splash no longer waits on the full
+    session: startup stays fast and the first SI-SDR / separation run creates
+    the session lazily with a short "Loading model …" pause instead of the
+    old ~17 s freeze.
+    """
+    global _WARM_SESSION
+    if _WARM_SESSION is not None:
+        return True
+    try:
+        from ort_util import cuda_ep_usable, nvidia_gpu_present
+
+        if not (
+            os.environ.get("STEM_ORT_CUDA", "1").strip() != "0"
+            and cuda_ep_usable()
+            and nvidia_gpu_present()
+        ):
+            return False
+        import onnxruntime as ort
+
+        small = None
+        for base in (APP_DIR, RESOURCE_DIR):
+            cands = sorted(
+                base.joinpath("models").glob("*.onnx"),
+                key=lambda p: p.stat().st_size,
+            )
+            small = next(
+                (c for c in cands if "htdemucs" not in c.name.lower()),
+                None,
+            )
+            if small is not None:
+                break
+        if small is None:
+            return False
+        # Default options (ORT_ENABLE_ALL): the graph-transform pass is what
+        # actually initializes the CUDA EP kernel factories / cuDNN + cuBLAS
+        # handles. ORT_DISABLE_ALL skips that, so the warm would be a no-op.
+        so = ort.SessionOptions()
+        _WARM_SESSION = ort.InferenceSession(
+            str(small),
+            sess_options=so,
+            providers=[
+                ("CUDAExecutionProvider", {"device_id": 0}),
+                "CPUExecutionProvider",
+            ],
+        )
+        return True
+    except Exception:
+        return False
+
+
+
 def _onnx_demucs_wanted() -> bool:
     """True when any ONNX stem-separation weight is present."""
     try:
-        from vocal_classifier_onnx import vocal_classifier_installed
+        from stem_cnn6_onnx import stem_cnn6_installed
 
-        if vocal_classifier_installed():
+        if stem_cnn6_installed():
             return True
     except Exception:
         pass
@@ -238,15 +301,30 @@ def load_demucs_model(model_id: str, *, prefer_gpu: bool = False):
         return DemucsOnnxModel(onnx_path, prefer_gpu=bool(prefer_gpu))
 
     if mid == "vocal_cnn6":
-        from vocal_classifier_onnx import VocalClassifierOnnxModel, resolve_vocal_classifier_onnx
+        from stem_cnn6_onnx import StemCnn6OnnxModel
+        from pathlib import Path as _Path
 
-        onnx_path = resolve_vocal_classifier_onnx()
+        here = _Path(__file__).resolve().parent
+        candidates = [
+            here / "models" / "stem_cnn6.onnx",
+        ]
+        try:
+            from deps_bootstrap import app_dir
+            ad = app_dir()
+            candidates.insert(0, ad / "models" / "stem_cnn6.onnx")
+        except Exception:
+            pass
+        onnx_path = None
+        for cand in candidates:
+            if cand.is_file():
+                onnx_path = cand
+                break
         if onnx_path is None:
             raise RuntimeError(
-                "Vocal CNN6 ONNX weight missing. Place models/vocal_classifier.onnx "
-                "beside the app."
+                "Stem CNN6 ONNX weight missing. Place "
+                "models/stem_cnn6.onnx beside the app."
             )
-        return VocalClassifierOnnxModel(onnx_path, prefer_gpu=bool(prefer_gpu))
+        return StemCnn6OnnxModel(onnx_path, prefer_gpu=bool(prefer_gpu))
 
     raise RuntimeError(
         f"Unknown model id {model_id!r} "
@@ -1085,6 +1163,7 @@ def _load_classify_chunk(file_paths, sr: int):
 
 def classify_batch(model, file_paths, device: str, batch_size: int = 4, stop_event=None):
     from concurrent.futures import ThreadPoolExecutor
+    from collections import deque
 
     sr = model.samplerate
     sources = list(model.sources)
@@ -1101,26 +1180,34 @@ def classify_batch(model, file_paths, device: str, batch_size: int = 4, stop_eve
             effective_bs = 1
 
     starts = list(range(0, len(file_paths), effective_bs))
-    # Prefetch next decode while Demucs runs (no quality change; overlaps I/O with GPU).
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        next_fut = None
-        for i, start in enumerate(starts):
+    # Prefetch decodes while Demucs runs (no quality change; overlaps I/O with GPU).
+    # Depth 3 with 3 decode threads keeps the GPU fed on multi-core machines; the
+    # buffered chunks are transient (freed once each batch is consumed). The pool
+    # shutdown on stop waits only ~one decode wall-clock since workers run parallel.
+    prefetch_depth = 3
+    with ThreadPoolExecutor(max_workers=prefetch_depth) as pool:
+        if stop_event and stop_event.is_set():
+            if not onnx and device == 'cuda':
+                model.cpu()
+                torch.cuda.empty_cache()
+            return
+        pending = deque()
+        for start in starts[:prefetch_depth]:
+            chunk = file_paths[start:start + effective_bs]
+            pending.append(pool.submit(_load_classify_chunk, chunk, sr))
+        for i in range(len(starts)):
             if stop_event and stop_event.is_set():
                 if not onnx and device == 'cuda':
                     model.cpu()
                     torch.cuda.empty_cache()
                 return
-            chunk = file_paths[start:start + effective_bs]
-            if next_fut is not None:
-                audios, lengths, valid, errors = next_fut.result()
-                next_fut = None
-            else:
-                audios, lengths, valid, errors = _load_classify_chunk(chunk, sr)
+            audios, lengths, valid, errors = pending.popleft().result()
             for fp, err in errors:
-                yield (fp, None, err)
-            if i + 1 < len(starts) and not (stop_event and stop_event.is_set()):
-                next_chunk = file_paths[starts[i + 1]:starts[i + 1] + effective_bs]
-                next_fut = pool.submit(_load_classify_chunk, next_chunk, sr)
+                yield (fp, None, err, None)
+            next_i = i + prefetch_depth
+            if next_i < len(starts) and not (stop_event and stop_event.is_set()):
+                next_chunk = file_paths[starts[next_i]:starts[next_i] + effective_bs]
+                pending.append(pool.submit(_load_classify_chunk, next_chunk, sr))
             if not audios:
                 continue
             max_len = max(lengths)
@@ -1137,11 +1224,11 @@ def classify_batch(model, file_paths, device: str, batch_size: int = 4, stop_eve
                         except Exception:
                             pass
                     if len(valid) == 1:
-                        yield (valid[0], None, 'cuda OOM')
+                        yield (valid[0], None, 'cuda OOM', None)
                         continue
                     for fp in valid:
                         yield from classify_batch(model, [fp], device, batch_size=1)
-                    continue
+                        continue
                 if (
                     not onnx
                     and device == 'cuda'
@@ -1154,22 +1241,29 @@ def classify_batch(model, file_paths, device: str, batch_size: int = 4, stop_eve
                             fp,
                             None,
                             'CUDA kernels incompatible with this GPU (use cu128 for RTX 50-series)',
+                            None,
                         )
                     continue
                 if isinstance(e, AssertionError):
                     if len(valid) == 1:
-                        yield (valid[0], None, 'audio too short for model')
+                        yield (valid[0], None, 'audio too short for model', None)
                         continue
                     for fp in valid:
                         yield from classify_batch(model, [fp], device, batch_size=1)
-                    continue
+                        continue
                 for fp in valid:
-                    yield (fp, None, str(e))
-                continue
+                    yield (fp, None, str(e), None)
+                    continue
 
             for j, fp in enumerate(valid):
                 energies = {n: _rms(out_np[j, k, :, :lengths[j]]) for k, n in enumerate(sources)}
-                yield (fp, energies, None)
+                # Optional fine label: the vocal classifier runner exposes the
+                # 11-class prediction per batch item; HTDemucs has none (None).
+                fine = None
+                fine_labels = getattr(model, '_last_fine_labels', None)
+                if fine_labels is not None and j < len(fine_labels):
+                    fine = fine_labels[j]
+                yield (fp, energies, None, fine)
             if not onnx and device == 'cuda':
                 torch.cuda.empty_cache()
 
@@ -2331,7 +2425,7 @@ class Worker(threading.Thread):
 
         self.log('Starting RMS classification...')
         t0 = time.monotonic()
-        for path, energies, err in classify_batch(model, stems, device, batch_size=int(self.p['batch_size']), stop_event=self._stop_event):
+        for path, energies, err, _fine in classify_batch(model, stems, device, batch_size=int(self.p['batch_size']), stop_event=self._stop_event):
             self._mark_stems_done(1)
             if self._stop_event.is_set():
                 # Outer folder loop logs "Stopped by user." once
@@ -2346,6 +2440,8 @@ class Worker(threading.Thread):
                 continue
             label, _, top_share, _margin, skip_reason = classify_to_category(
                 energies, mode_cfg, float(self.p['threshold']), float(self.p['min_margin']))
+            # Coarse bucket only — the fine 11-class label (organ/guitar/…)
+            # stays internal; the log badge shows bass/drums/other/vocals.
             self.log(f"  {label} {top_share:.0%}  →  {path.name}")
             if label == 'skip':
                 skipped += 1
@@ -2448,9 +2544,9 @@ class Worker(threading.Thread):
                 mid = str(p.get('model_id') or '')
                 if mid == 'vocal_cnn6':
                     self.log(
-                        '  [warn] Vocal CNN6 ONNX weight missing (~24 MB). '
+                        '  [warn] Stem CNN6 ONNX weight missing (~24 MB). '
                         "Re-run the installer's models component, or place "
-                        'models/vocal_classifier.onnx beside the app.'
+                        'models/stem_cnn6.onnx beside the app.'
                     )
                 else:
                     self.log(
@@ -2819,9 +2915,9 @@ class SdrWorker(threading.Thread):
                 mid = str(p.get('model_id') or '')
                 if mid == 'vocal_cnn6':
                     self.log(
-                        '  [warn] Vocal CNN6 ONNX weight missing (~24 MB). '
+                        '  [warn] Stem CNN6 ONNX weight missing (~24 MB). '
                         "Re-run the installer's models component, or place "
-                        'models/vocal_classifier.onnx beside the app.'
+                        'models/stem_cnn6.onnx beside the app.'
                     )
                 else:
                     self.log(

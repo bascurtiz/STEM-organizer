@@ -117,13 +117,13 @@ echo [3/3] verify KeyNet deps ...
 "%PY%" -c "import torch, librosa, numpy; print('OK key_tagger deps')"
 if errorlevel 1 goto fail
 
-if not exist "%~dp0checkpoints\nf50-q05-221125.pt" (
+if not exist "%~dp0..\models\nf50-q05-221125.onnx" (
     echo WARNING: checkpoint missing:
-    echo   %~dp0checkpoints\nf50-q05-221125.pt
+    echo   %~dp0..\models\nf50-q05-221125.onnx
 )
 
 echo.
-echo Done (%TORCH_LABEL%). Key Detect uses checkpoints\nf50-q05-221125.pt
+echo Done (%TORCH_LABEL%). Key Detect uses ..\models\nf50-q05-221125.onnx
 if /I not "%STEM_KEY_BUNDLED%"=="1" if /I not "%STEM_GG_BUNDLED%"=="1" pause
 exit /b 0
 

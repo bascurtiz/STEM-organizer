@@ -18,7 +18,8 @@ from maest_fe_np import SAMPLE_RATE as MAEST_SR
 from maest_fe_np import maest_input_values
 
 HERE = Path(__file__).resolve().parent
-MODELS = HERE / "models"
+# Single model source: the root models/ folder (beside the exe when frozen).
+MODELS = HERE.parent / "models"
 ONNX_NAME = "maest_discogs519.onnx"
 LABELS_NAME = "maest_discogs519.id2label.json"
 

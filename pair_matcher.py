@@ -11,7 +11,11 @@ from typing import Callable
 
 from mutagen import File as MutagenFile
 
-AUDIO_EXTS = ('.flac', '.mp3')
+# Align with the app-wide AUDIO_EXTS (classify_backend): Pair Finder and
+# Align must see every format users feed the rest of the app. Mutagen reads
+# tags for all of these; stem_align falls back to librosa/ffmpeg for codecs
+# soundfile can't decode (mp3/m4a/opus).
+AUDIO_EXTS = ('.wav', '.mp3', '.flac', '.aif', '.aiff', '.ogg', '.m4a', '.opus')
 ProgressFn = Callable[[int, int, str], None]
 LogFn = Callable[[str, str], None]
 

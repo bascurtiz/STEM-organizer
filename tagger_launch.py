@@ -116,7 +116,13 @@ def key_tagger_script() -> Path:
 
 
 def _site_packages() -> Path | None:
-    """Prefer ``<exe_dir>\\site-packages`` that holds hear21passt when frozen."""
+    """Prefer ``<exe_dir>\\site-packages`` when frozen.
+
+    Historically this hunted for a site-packages containing hear21passt (the
+    PaSST torch frontend). The Stem CNN6 tagger is ONNX-only and ships its
+    runner in the freeze, so there's no hear21passt dependency anymore — we
+    just return the first available site-packages (exe-dir preferred).
+    """
     dirs = [p for p in external_site_dirs() if p.is_dir()]
     if is_frozen():
         exe_site = frozen_exe_dir() / "site-packages"
@@ -132,11 +138,8 @@ def _site_packages() -> Path | None:
                 except OSError:
                     return str(p) == exe_key
 
-            # Put exe-dir first so Auto-detect matches install-deps.bat layout.
+            # Put exe-dir first so Auto-detect matches the install layout.
             dirs = [exe_site] + [p for p in dirs if not _same(p)]
-        with_passt = [p for p in dirs if (p / "hear21passt").is_dir()]
-        if with_passt:
-            return with_passt[0]
     return dirs[0] if dirs else None
 
 
@@ -233,16 +236,16 @@ def _venv_python_candidates(root: Path) -> tuple[Path, ...]:
     )
 
 
-def _site_has_hear21passt(site: Path) -> bool:
-    return (site / "hear21passt").is_dir()
-
-
 def resolve_tagger_python() -> Path | None:
     """Interpreter for tagger subprocesses.
 
     Frozen + STEM_ONNX: the .exe itself (argv self-dispatch via ``--run-tagger``).
     Frozen + legacy: host Python + site-packages.
     Source: genre_gender_tagger\\venv when present.
+
+    Note: the Stem CNN6 instrument tagger is ONNX-only (no hear21passt), so the
+    legacy frozen path no longer requires hear21passt in site-packages — only
+    that a site-packages dir exists.
     """
     root = tagger_app_root()
     if is_frozen():
@@ -253,13 +256,11 @@ def resolve_tagger_python() -> Path | None:
                 return exe
         site = _site_packages()
         host = resolve_host_python()
-        if host is not None and site is not None and _site_has_hear21passt(site):
+        if host is not None and site is not None:
             return host
         for path in _venv_python_candidates(root):
             if path.is_file():
                 return path
-        if host is not None and site is not None:
-            return host
         # Last resort: still try self-dispatch
         exe = Path(sys.executable)
         return exe if exe.is_file() else None
@@ -319,6 +320,39 @@ def build_tagger_command(script: Path, *script_args: str) -> list[str]:
     return [str(python), "-u", str(script), *script_args]
 
 
+def _force_utf8_stdio() -> None:
+    """Force UTF-8 on the tagger child's stdout/stderr.
+
+    PyInstaller's bootloader hands the frozen child a locale-encoded pipe
+    (cp1252 here) even when PYTHONIOENCODING=utf-8 is set in the env, so
+    non-ASCII chars the tagger prints (…, ·, –) arrive as cp1252 bytes. The
+    GUI parent always decodes the tagger pipe as UTF-8, so those bytes become
+    U+FFFD replacement diamonds in the log panel. Re-wrap the streams to UTF-8
+    in-process before the tagger script runs.
+    """
+    import io as _io
+
+    for _name in ("stdout", "stderr"):
+        _stream = getattr(sys, _name, None)
+        if _stream is None:
+            continue
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+            continue
+        except (AttributeError, ValueError, OSError):
+            pass
+        _buf = getattr(_stream, "buffer", None)
+        if _buf is not None:
+            try:
+                setattr(
+                    sys,
+                    _name,
+                    _io.TextIOWrapper(_buf, encoding="utf-8", errors="replace", line_buffering=True),
+                )
+            except Exception:
+                pass
+
+
 def maybe_run_tagger_dispatch(argv: list[str] | None = None) -> int | None:
     """If argv is ``--run-tagger <name> …``, run that tagger and return exit code.
 
@@ -346,10 +380,11 @@ def maybe_run_tagger_dispatch(argv: list[str] | None = None) -> int | None:
     # Child must not grab the GUI single-instance mutex / splash.
     os.environ["STEM_TAGGER_CHILD"] = "1"
     os.environ.setdefault("STEM_ALLOW_MULTI", "1")
+    _force_utf8_stdio()
 
     import runpy
 
-    # Put script dir first so local imports (passt_mel_np, etc.) resolve.
+    # Put script dir first so the tagger's local imports resolve.
     script_dir = str(script.parent)
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
@@ -405,9 +440,10 @@ def _env_set_ci(env: dict[str, str], name: str, value: str) -> None:
 def tagger_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Env for tagger spawn; sets PYTHONPATH to site-packages when frozen.
 
-    Host Python (not the .exe) must see hear21passt / onnxruntime wheels
-    installed by root install-deps.bat into ``site-packages\\`` beside the
-    .exe — same shape as: ``set PYTHONPATH=%CD%\\site-packages``.
+    Host Python (not the .exe) must see the tagger dependencies (onnxruntime,
+    librosa, soundfile) installed by root install-deps.bat into
+    ``site-packages\\`` beside the .exe — same shape as:
+    ``set PYTHONPATH=%CD%\\site-packages``.
     """
     env = dict(base if base is not None else os.environ)
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -426,7 +462,7 @@ def tagger_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
         entry = str(site)
     existing = _env_get_ci(env, "PYTHONPATH")
     parts = [p for p in existing.split(os.pathsep) if p]
-    # Always put site-packages first so Auto-detect finds hear21passt.
+    # Always put site-packages first so Auto-detect finds tagger deps.
     parts = [p for p in parts if os.path.normcase(p) != os.path.normcase(entry)]
     _env_set_ci(
         env,

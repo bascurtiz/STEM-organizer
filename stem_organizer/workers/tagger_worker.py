@@ -265,7 +265,6 @@ class TaggerWorker(QThread):
                 env.setdefault("MKL_NUM_THREADS", "1")
                 env.setdefault("OPENBLAS_NUM_THREADS", "1")
                 env.setdefault("NUMEXPR_NUM_THREADS", "1")
-                env.setdefault("STEM_ORT_INTRA_OP", "2")
 
         try:
             self._proc = subprocess.Popen(

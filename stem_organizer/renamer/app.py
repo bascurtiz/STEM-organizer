@@ -298,6 +298,8 @@ class TrackRenamerApp(QWidget):
         # not on every re-scan of the same folder (e.g. after a rename).
         self._samplepack_picked_folder: Optional[Path] = None
         self._pre_samplepack_preset: str = "Default"  # restore on uncheck
+        # Preview ✓ exclusions survive category overrides and folder rescans.
+        self._excluded_track_keys: set[str] = set()
 
         PRESETS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -581,6 +583,41 @@ class TrackRenamerApp(QWidget):
         if new_h != pad.height():
             pad.setFixedHeight(new_h)
 
+    # ----- preview selection persistence -----
+
+    @staticmethod
+    def _track_path_key(path: str | Path) -> str:
+        return str(Path(path).resolve(strict=False)).casefold()
+
+    def _sync_excluded_from_tracks(self) -> None:
+        """Remember which files the user unchecked in the preview list."""
+        self._excluded_track_keys = {
+            self._track_path_key(t.id)
+            for t in self.tracks
+            if not t.selected
+        }
+
+    def _apply_excluded_to_tracks(self, tracks: List) -> None:
+        """Restore preview ✓ exclusions after a rescan or track reload."""
+        if not self._excluded_track_keys:
+            return
+        for track in tracks:
+            if self._track_path_key(track.id) in self._excluded_track_keys:
+                track.selected = False
+
+    def _remap_excluded_for_renames(self, renames: dict[str, str]) -> None:
+        """Carry exclusions forward when prefix override renames files on disk."""
+        if not self._excluded_track_keys or not renames:
+            return
+        for old_id, new_stem in renames.items():
+            old_key = self._track_path_key(old_id)
+            if old_key not in self._excluded_track_keys:
+                continue
+            old_path = Path(old_id)
+            new_path = old_path.with_name(f"{str(new_stem).strip()}{old_path.suffix}")
+            self._excluded_track_keys.discard(old_key)
+            self._excluded_track_keys.add(self._track_path_key(new_path))
+
     # ----- rules / preview -----
 
     def _rules_fingerprint(self, rules: List[Rule]) -> str:
@@ -649,6 +686,9 @@ class TrackRenamerApp(QWidget):
         self.folder_row.set_text(display_path(str(path)))
 
     def _scan_folder(self, path: Path) -> None:
+        resolved = path.resolve()
+        if self.folder_path is not None and self.folder_path.resolve() != resolved:
+            self._excluded_track_keys.clear()
         self._scan_generation += 1
         generation = self._scan_generation
         self.folder_path = path
@@ -691,6 +731,7 @@ class TrackRenamerApp(QWidget):
             self._set_busy(False, "Idle")
             return
         self.tracks = list(tracks)
+        self._apply_excluded_to_tracks(self.tracks)
         self.folder_path = Path(path) if not isinstance(path, Path) else path
         self.demo_mode = False
         self._set_source_path(self.folder_path)
@@ -966,12 +1007,13 @@ class TrackRenamerApp(QWidget):
                 "Rename Files",
                 "No selected files will change after instrument analysis.",
             )
-            self.preview_panel.end_analyze_log()
+            # Keep the Analyze log visible — the user may still want to review it.
             self._refresh_preview()
             return
         n = len(renames)
         if not ask_yes_no(parent, "Rename Files", f"Rename {n} file(s)?"):
-            self.preview_panel.end_analyze_log()
+            # No: keep the Analyze log visible; the file table is still refreshed
+            # underneath so switching back shows current names.
             self._refresh_preview()
             return
         self.preview_panel.end_analyze_log()
@@ -997,6 +1039,8 @@ class TrackRenamerApp(QWidget):
         return renames
 
     def _start_rename_job(self, renames: dict) -> None:
+        self._sync_excluded_from_tracks()
+        self._remap_excluded_for_renames(renames)
         self.preview_panel.clear_active()
         # Drop ffplay/ffmpeg locks before staging renames (WinError 32 otherwise).
         # Short settle on UI thread; worker does a longer post-Analyze settle.
@@ -1359,6 +1403,7 @@ class TrackRenamerApp(QWidget):
         self._update_footer()
 
     def _update_footer(self) -> None:
+        self._sync_excluded_from_tracks()
         total = len(self.tracks)
         selected_n = sum(1 for t in self.tracks if t.selected)
         rename_count = self.preview_panel.rename_count()

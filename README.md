@@ -30,7 +30,7 @@ Default ML path is **torch-free**: ONNX Runtime (`onnxruntime-gpu`, CUDA EP on N
 | **Genre & Gender** | **Genre** — [MAEST](https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e) genre/style tags<br>**Gender** — [EffNet gender](https://essentia.upf.edu/models.html#voice-gender) (male/female) + In-house trained reverb (dry/wet)<br>**Vocal type** — [PANNs](https://github.com/qiuqiangkong/audioset_tagging_cnn) (Singing/Speech/Rapping/Humming/Choir) |
 | **Key** | In-house trained KeyNet CNN → `KEY` / Initial key — [outperforms](https://docs.google.com/spreadsheets/d/1asmBVlIjimZ9XAmK5JE42SX4vAvjGqjLflukYBgFSuE/edit?usp=sharing) [original model](https://github.com/a1ex90/MusicalKeyCNN/blob/main/checkpoints/keynet.pt) + [MIK](https://mixedinkey.com/) |
 | **Match & Align** | Pair instrumental/vocal folders, organize pairs, align stems to a reference |
-| **Rename** | Rule-based sample rename + optional instrument Auto-detect ([OpenMIC](https://research.atspotify.com/publications/openmic-2018-an-open-dataset-for-multiple-instrument-recognition) / [hear21passt](https://github.com/kkoutini/passt_hear21)) |
+| **Rename** | Rule-based sample rename + optional instrument Auto-detect (Stem CNN6, 11-class instrument classifier) |
 | **Integrity** | **Compression** — [FLAC Detective](https://pypi.org/project/flac-detective/) lossless/lossy<br>**Corruption** — fast/deep verify + fix ([AudioTester](http://www.vuplayer.com/other.php) / [foobar2k](https://www.foobar2000.org/) alike)<br>**Convert** — batch to FLAC |
 | **Charts** | Scan library roots → donuts, genre/style breakdown, [SI-SDR](https://source-separation.github.io/tutorial/basics/evaluation.html#si-sdr) bars<br>Export PNG/PDF + output balanced dataset |
 
@@ -79,7 +79,7 @@ Shipped ONNX set (installer downloads from the models Release; not in source zip
 |---------|------|
 | Demucs HTDemucs | `models\htdemucs.onnx` |
 | PANNs Cnn14 | `panns_tagger\models\cnn14.onnx` |
-| PaSST OpenMIC | `instrument_tagger\models\passt_openmic.onnx` |
+| Stem CNN6 (Rename) | `instrument_tagger\models\stem_cnn6.onnx` |
 | MAEST genre | `genre_gender_tagger\models\maest_discogs519.onnx` |
 | EffNet embeddings | `genre_gender_tagger\models\discogs-effnet-bsdynamic-1.onnx` |
 | Gender EffNet | `genre_gender_tagger\models\gender-discogs-effnet-1.onnx` |
@@ -113,7 +113,7 @@ STEM-organizer-Py6/
 ├── stem_organizer.iss         # Inno Setup (external model download)
 ├── stem_organizer/            # PySide6 UI + dataset tools
 ├── genre_gender_tagger/       # MAEST + EffNet tagger
-├── instrument_tagger/         # PaSST Auto-detect
+├── instrument_tagger/         # Stem CNN6 Auto-detect
 ├── panns_tagger/              # PANNs vocal type
 └── key_tagger/                # KeyNet key detection
 ```

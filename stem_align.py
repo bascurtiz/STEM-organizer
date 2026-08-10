@@ -865,9 +865,9 @@ def _resample_audio(y: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     import librosa
 
     if y.ndim == 1:
-        return librosa.resample(y, orig_sr=orig_sr, target_sr=target_sr, res_type='kaiser_fast')
+        return librosa.resample(y, orig_sr=orig_sr, target_sr=target_sr, res_type='soxr_hq')
     channels = [
-        librosa.resample(y[:, ch], orig_sr=orig_sr, target_sr=target_sr, res_type='kaiser_fast')
+        librosa.resample(y[:, ch], orig_sr=orig_sr, target_sr=target_sr, res_type='soxr_hq')
         for ch in range(y.shape[1])
     ]
     min_len = min(len(ch) for ch in channels)

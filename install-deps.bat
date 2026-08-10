@@ -12,14 +12,14 @@ REM     if missing.
 REM
 REM Source / .venv (no STEM-organizer.exe here):
 REM   - Creates/uses .venv and installs pinned deps from requirements.txt
-REM     (onnxruntime-gpu==1.28.0 + nvidia CUDA/cuDNN wheels + audio helpers).
+REM     (onnxruntime-gpu==1.26.0 + nvidia CUDA/cuDNN wheels + audio helpers).
 REM   - Then fetches ffmpeg / mp3val / flac.
 REM
 REM Classify GPU = CUDA EP (NVIDIA). HTDemucs requires CUDA (DirectML bad).
 REM Separators = HTDemucs / Vocal CNN6 ONNX.
 REM ONNX model weights are NOT installed here - installer downloads them from
 REM GitHub (bascurtiz/STEM-organizer-models tag "models"), or place them under
-REM models\ / tagger folders for a local freeze.
+REM the root models\ folder (single source for all features) for a local freeze.
 REM =============================================================================
 
 echo.
@@ -311,7 +311,7 @@ echo   Done
 echo ========================================
 if "%USE_SITE%"=="1" (
     echo Frozen app: tools checked/installed beside the EXE.
-    echo Models: downloaded by the installer, or keep existing models\ folders.
+    echo Models: downloaded by the installer, or keep the existing models\ folder.
 ) else (
     echo Source .venv: requirements.txt installed ^(onnxruntime-gpu + CUDA wheels + audio^).
     echo Classify GPU uses CUDA EP on NVIDIA ^(onnxruntime-gpu^).

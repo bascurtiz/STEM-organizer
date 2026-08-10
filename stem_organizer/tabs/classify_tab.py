@@ -14,10 +14,12 @@ from typing import Optional
 from PySide6.QtCore import Qt, QTimer, QSignalBlocker, Signal
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QHBoxLayout,
     QSizePolicy,
     QStackedWidget,
+    QLabel,
     QVBoxLayout,
     QWidget,
 )
@@ -559,23 +561,24 @@ class ClassifyTab(QWidget):
         """Stem-mode labels selectable for a given model.
 
         HTDemucs produces 4 stems → 2/4 only (no guitar/piano).
-        Vocal CNN6 classifies vocal/instrumental → 2-stem only.
+        Vocal CNN6 / Stem CNN6 classify into 11 instrument classes that
+        collapse to vocals/bass/drums/other → 2-stem and 4-stem.
         """
         all_modes = list(cb.STEM_MODES.keys())
-        model_id = cb.MODELS.get(model_label, '')
-        if model_id == 'vocal_cnn6':
-            return [m for m in all_modes if m.startswith('2 ')]
         return [m for m in all_modes if not m.startswith('6 ')]
 
     def _model_tooltip(self, model_label: str) -> str:
         model_id = cb.MODELS.get(model_label, '')
         if model_id == 'vocal_cnn6':
             return theme.format_tooltip(
-                "Vocal CNN6 — lightweight binary classifier (4.9M params). "
-                "Classifies stems as vocal or instrumental in one fast forward pass "
-                "(~10 ms per clip on GPU), no stem separation needed. "
-                "2-stem mode only. For SI-SDR quality scoring, switch to HTDemucs "
-                "or another separator after RMS classification completes."
+                "Stem CNN6 — 11-class instrument classifier (~6M params). "
+                "Predicts BASS/DRUMS/FLUTE/FX/GUITAR/KEYS/ORGAN/STRINGS/"
+                "SYNTH/VOCALS/WINDS in one fast forward pass (~10 ms/clip on GPU), "
+                "no stem separation needed. The log shows the fine label; "
+                "bucketing collapses to 2-stem (vocals/instrumental) or "
+                "4-stem (vocals/bass/drums/other). "
+                "For SI-SDR quality scoring, use HTDemucs (SI-SDR always "
+                "runs through HTDemucs regardless of classifier choice)."
             )
         return theme.format_tooltip(
             "htdemucs — Hybrid Transformer Demucs (StemSplit ONNX). "
@@ -732,6 +735,10 @@ class ClassifyTab(QWidget):
                 "err",
             )
             return
+        # Show the warmup overlay right away: the preflight scan and the one-time
+        # HTDemucs session build would otherwise leave the user staring at a busy
+        # cursor for 15-30 s (the ORT build holds the GIL and starves the GUI).
+        self._show_warmup_overlay("Preparing SI-SDR…\nScanning folders…")
         params = {
             "target_dir": target_dir,
             "use_cuda": self.use_cuda.isChecked(),
@@ -767,16 +774,21 @@ class ClassifyTab(QWidget):
         params = self._pending_sdr_params
         self._pending_sdr_params = None
         if params is None or result is None:
+            self._hide_warmup_overlay()
             self.set_running(False)
             if result is None:
                 self.request_log.emit("  [stopping] SI-SDR scan cancelled.", "warn")
             return
         if not isinstance(result, dict):
+            self._hide_warmup_overlay()
             self.set_running(False)
             self.request_log.emit("[error] SI-SDR scan returned unexpected data.", "err")
             return
         self._apply_sdr_process_all_prompts(params, result)
         self._worker_kind = "sdr"
+        self._show_warmup_overlay(
+            "Initializing demucs model…\n(first run only - takes ~15-20s)"
+        )
         self.request_log.emit("  Starting…", "")
         self._worker = SdrClassifyWorker(params, parent=self)
         self._wire_worker(self._worker)
@@ -844,8 +856,12 @@ class ClassifyTab(QWidget):
     def _wire_worker(self, worker: BaseWorker) -> None:
         worker.log_line.connect(self._forward_worker_log)
         worker.progress.connect(self.request_progress)
+        # Hide the warmup overlay on the first progress update (model loaded).
+        worker.progress.connect(lambda *_a: self._hide_warmup_overlay())
         worker.sdr_line.connect(self.request_sdr_log)
         worker.finished_ok.connect(self._on_worker_done)
+        # Also hide on finish (in case progress never fired).
+        worker.finished_ok.connect(lambda: self._hide_warmup_overlay())
 
     def _forward_worker_log(self, text: str, tag: str = "") -> None:
         """Forward worker log lines; remember RMS completion for the SI-SDR offer."""
@@ -869,6 +885,12 @@ class ClassifyTab(QWidget):
 
     def _offer_sdr_after_rms(self) -> None:
         """After a successful RMS run, switch to SI-SDR then prompt (CTk order)."""
+        # Auto-switch from Stem CNN6 to HTDemucs so SI-SDR can run without a
+        # manual model change.  The SDR error guard in _start_sdr rejects the
+        # classifier model, so this keeps the workflow seamless.  This is the
+        # ONLY place the model is forced — it fires just after Classify done.
+        if self.model_combo.currentText() == 'Stem CNN6':
+            self.model_combo.setCurrentText('HTdemucs (demucs)')
         # Switch first so the tab is ready even while the info dialog is up.
         self._switch_to_sdr_tab()
         parent = self.window() or self
@@ -879,6 +901,55 @@ class ClassifyTab(QWidget):
             "Check the SI-SDR thresholds and settings before you hit Start SI-SDR.",
         )
 
+
+    # ----- HTDemucs warmup overlay ------------------------------------------------
+
+    def _show_warmup_overlay(self, text: str = "Preparing\u2026") -> None:
+        """Show a dark overlay with status text during HTDemucs session init."""
+        if getattr(self, "_warmup_overlay", None) is None:
+            self._warmup_overlay = QWidget(self)
+            self._warmup_overlay.setObjectName("WarmupOverlay")
+            self._warmup_overlay.setAttribute(
+                Qt.WA_StyledBackground, True
+            )
+            # Same veil as the modal dialogs' dim_behind scrim (theme log_bg at
+            # alpha 160).  Pure black at this alpha composites far darker.
+            _veil_c = theme.COLORS["log_bg"].lstrip("#")
+            _veil = "rgba({}, {}, {}, 160)".format(
+                *(int(_veil_c[i : i + 2], 16) for i in (0, 2, 4))
+            )
+            self._warmup_overlay.setStyleSheet(
+                "QWidget#WarmupOverlay {"
+                f"  background-color: {_veil};"
+                "}"
+            )
+            self._warmup_overlay.hide()
+            # Label centered in the overlay.
+            self._warmup_label = QLabel(self._warmup_overlay)
+            self._warmup_label.setAlignment(Qt.AlignCenter)
+            self._warmup_label.setStyleSheet(
+                "color: #ffffff; font-size: 18px; font-weight: 600;"
+                "background: transparent; padding: 30px;"
+            )
+        self._warmup_overlay.setGeometry(self.rect())
+        self._warmup_label.setText(text)
+        self._warmup_label.adjustSize()
+        self._warmup_label.move(
+            (self._warmup_overlay.width() - self._warmup_label.width()) // 2,
+            (self._warmup_overlay.height() - self._warmup_label.height()) // 2,
+        )
+        self._warmup_overlay.show()
+        self._warmup_overlay.raise_()
+        # Force immediate paint so the user sees it even if the GIL is busy.
+        QApplication.processEvents()
+
+    def _hide_warmup_overlay(self) -> None:
+        overlay = getattr(self, "_warmup_overlay", None)
+        if overlay is not None:
+            overlay.hide()
+
+    # -------------------------------------------------------------------------
+
     def _switch_to_sdr_tab(self) -> None:
         """Select SI-SDR classification page and refresh Start / Stop labels."""
         self._cls_seg.setCurrentItem("sdr")
@@ -887,6 +958,7 @@ class ClassifyTab(QWidget):
         self.set_running(False)
 
     def _on_stop(self) -> None:
+        self._hide_warmup_overlay()
         if self._worker is None:
             return
         self._worker.stop()

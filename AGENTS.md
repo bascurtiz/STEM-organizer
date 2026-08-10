@@ -43,7 +43,7 @@
   files are gone from the shipped build.
 - **App / models remotes:** `bascurtiz/STEM-organizer`,
   `bascurtiz/STEM-organizer-models` tag `models`. The installer downloads 9
-  ONNX assets (htdemucs, vocal_classifier, cnn14, passt_openmic, maest,
+  ONNX assets (htdemucs, vocal_classifier, cnn14, stem_cnn6, maest,
   discogs-effnet, gender, vocal_reverb, nf50). The release **also hosts the
   retired UMX-L / X-UMXL / SCNet Tran / BS-RoFormer weights (`_`-prefixed) as
   backup** — the app/build/installer do not use them; **do not delete them**
@@ -288,7 +288,8 @@ audio analysis**. Every architectural decision should support that objective.
 
 | Item | Status |
 |---|---|
-| Taggers ONNX (vocal_reverb, KeyNet, Cnn14, PaSST, MAEST) | **Keep** — unaffected |
+| Taggers ONNX (vocal_reverb, KeyNet, Cnn14, MAEST) | **Keep** — unaffected |
+| Rename Auto-detect (PaSST OpenMIC → Stem CNN6) | **Done** (2026-08) — 11-class raw-waveform ONNX replaces the 20-class PaSST/hear21passt stack; 12 prefix categories → 11 (dropped Mallet/Percussion/Orchestra; split Flute/Organ into own prefixes) |
 | Packaging (single Inno EXE, external model download) | **Done** — trimmed to 9 model assets |
 | HTDemucs ONNX + CUDA EP Classify | **Current** — only shipped Classify separator |
 | Vocal CNN6 ONNX | **Current** — 2-stem fast path |

@@ -52,7 +52,10 @@ class IntegrityTab(QWidget):
             self._sync_input_from_compression()
 
     def _sync_input_from_compression(self) -> None:
-        """Corruption + Convert take over Compression's input folder."""
+        """Corruption + Convert take over Compression's input folder.
+
+        Only fills empty rows — never clobbers a path the user already picked.
+        """
         try:
             self.compression.flush_settings()
         except Exception:
@@ -62,10 +65,10 @@ class IntegrityTab(QWidget):
             return
         idx = self._tabview.currentIndex()
         if idx == 1:
-            if self.corruption.input_row.text().strip() != path:
+            if not self.corruption.input_row.text().strip():
                 self.corruption.input_row.set_text(path)
         elif idx == 2:
-            if self.convert.input_row.text().strip() != path:
+            if not self.convert.input_row.text().strip():
                 self.convert.input_row.set_text(path)
 
     def on_tab_shown(self) -> None:

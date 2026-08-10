@@ -8,6 +8,8 @@ Stage 9 wires together:
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sys
 import traceback
@@ -16,11 +18,17 @@ from pathlib import Path
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from . import theme
-from .app import MainWindow
-from .settings_store import SettingsStore, app_dir
-from .splash import Splash, dismiss_splash, show_splash_and_startup
-from .widgets.dialogs import show_info
+# qfluentwidgets prints a promotional banner ("QFluentWidgets Pro is now
+# released …") to stdout on first import. That import happens here, at module
+# load time, in EVERY process — including the --run-tagger tagger children
+# whose stdout the GUI captures into the log panel. Silence it so the banner
+# never clutters the log.
+with contextlib.redirect_stdout(io.StringIO()):
+    from . import theme
+    from .app import MainWindow
+    from .settings_store import SettingsStore, app_dir
+    from .splash import Splash, dismiss_splash, show_splash_and_startup
+    from .widgets.dialogs import show_info
 
 
 def _startup_error_report(exc: BaseException) -> str:
@@ -236,6 +244,10 @@ def _construct_and_show(
             run_check_in_thread(theme.APP_VERSION, window)
         except Exception:
             pass
+
+        # HTDemucs loads lazily on the first SI-SDR / separation run (the
+        # worker logs "Loading model …" and the session is cached for the rest
+        # of the session) — no background warm, no post-launch GIL stall.
     except Exception:
         if splash is not None:
             splash.close()

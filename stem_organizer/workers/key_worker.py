@@ -103,8 +103,10 @@ class KeyWorker(QThread):
             self.finished_ok.emit("Failed — Python missing")
             return
 
-        ckpt_onnx = tagger_dir / "checkpoints" / "nf50-q05-221125.onnx"
-        ckpt_pt = tagger_dir / "checkpoints" / "nf50-q05-221125.pt"
+        # Single model source: root models/ (same resolution as key_tagger._default_checkpoint).
+        model_root = tagger_dir.parent / "models"
+        ckpt_onnx = model_root / "nf50-q05-221125.onnx"
+        ckpt_pt = model_root / "nf50-q05-221125.pt"
         ckpt = ckpt_onnx if ckpt_onnx.is_file() else ckpt_pt
         input_dir = str(Path(self._input_dir).expanduser().resolve())
         script_args: list[str] = [

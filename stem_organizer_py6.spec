@@ -42,8 +42,6 @@ datas += [('genre_gender_tagger/maest_fe_np.py', 'genre_gender_tagger')]
 datas += [('genre_gender_tagger/_maest_audio_utils.py', 'genre_gender_tagger')]
 datas += [('genre_gender_tagger/requirements.txt', 'genre_gender_tagger')]
 datas += [('instrument_tagger/instrument_tagger.py', 'instrument_tagger')]
-datas += [('instrument_tagger/passt_mel.py', 'instrument_tagger')]
-datas += [('instrument_tagger/passt_mel_np.py', 'instrument_tagger')]
 datas += [('panns_tagger/panns_tagger.py', 'panns_tagger')]
 datas += [('panns_tagger/file_writable.py', 'panns_tagger')]
 datas += [('panns_tagger/readme.md', 'panns_tagger')]
@@ -54,7 +52,7 @@ datas += [('key_tagger/model.py', 'key_tagger')]
 datas += [('key_tagger/log_pace.py', 'key_tagger')]
 datas += [('key_tagger/requirements.txt', 'key_tagger')]
 datas += [('demucs_onnx.py', '.')]
-datas += [('vocal_classifier_onnx.py', '.')]
+datas += [('stem_cnn6_onnx.py', '.')]
 datas += [('ort_util.py', '.')]
 
 try:
@@ -105,8 +103,7 @@ hiddenimports += list(_PYSIDE6_KEEP)
 hiddenimports += ['shiboken6']
 hiddenimports += ['classify_backend', 'pair_matcher', 'stem_align',
                   'ffmpeg_bootstrap', 'mp3val_bootstrap', 'flac_bootstrap', 'deps_bootstrap', 'tagger_launch',
-                  'demucs_onnx', 'vocal_classifier_onnx', 'ort_util',
-                  'panns_enrich',
+                  'demucs_onnx', 'stem_cnn6_onnx', 'ort_util',
                   'resource_monitor',
                   'update_checker', 'single_instance', 'done_sound',
                   'audio_resample',

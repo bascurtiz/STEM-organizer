@@ -423,7 +423,9 @@ class KeyDetectTab(QWidget):
             self._loading = False
 
     def on_tab_shown(self) -> None:
-        """Key input takes over Classify output path."""
+        """Key input takes over Classify output path — only when empty."""
+        if self.input_row.text().strip():
+            return
         classify_out = (self._settings.data.get("output_dir") or "").strip()
         if classify_out:
             self._loading = True

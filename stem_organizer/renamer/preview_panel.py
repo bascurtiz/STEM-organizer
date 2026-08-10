@@ -61,7 +61,7 @@ from qfluentwidgets import (
 )
 
 from track_renamer.category_palette import default_category_color, parse_category_prefix_display
-from track_renamer.engine.models import CategoryRule, PreviewRow, Track
+from track_renamer.engine.models import CategoryRule, PreviewRow, Rule, Track
 from track_renamer.engine.ops import override_category_affix
 from track_renamer.engine.processor import compute_preview_row, prepare_rules
 
@@ -771,6 +771,12 @@ class PreviewPanel(QWidget):
         for b in (self.select_all_btn, self.deselect_all_btn, self.only_changed_btn):
             tools.addWidget(b)
         tools.addStretch(1)
+        # Dismiss the Analyze log and return to the file table (right-aligned).
+        self.show_files_btn = PushButton("Back to files")
+        self.show_files_btn.setToolTip(TIPS.get("back_to_files", "Show the file list again"))
+        self.show_files_btn.clicked.connect(self.show_table_view)
+        self.show_files_btn.hide()
+        tools.addWidget(self.show_files_btn)
         layout.addLayout(tools)
 
         # Stacked: table / analyze log
@@ -1149,11 +1155,17 @@ class PreviewPanel(QWidget):
     # the same color source as the preview table badge (model._category_colors
     # / default_category_color) so log chips and table chips stay in sync.
 
+    def show_table_view(self) -> None:
+        """User dismissed the Analyze log — switch back to the file table."""
+        self._stack.setCurrentWidget(self.table)
+        self.show_files_btn.hide()
+
     def begin_analyze_log(self, total: int) -> None:
         self._stack.setCurrentWidget(self.analyze_log)
+        self.show_files_btn.show()
         self.analyze_log.clear()
         # Startup/config indented like Classify; === Summary stays flush.
-        self._append_line(f"{LOG_INDENT}Starting Auto-detect (PaSST OpenMIC)…", "info")
+        self._append_line(f"{LOG_INDENT}Starting Auto-detect (Stem CNN6)…", "info")
         self._append_line(f"{LOG_INDENT}Selected {total:,} file(s).", "info")
         self._append_line(f"{LOG_INDENT}Checking cache / starting tagger…", "info")
         self._append_line("", "info")
@@ -1214,7 +1226,7 @@ class PreviewPanel(QWidget):
             pass
 
     def end_analyze_log(self) -> None:
-        self._stack.setCurrentWidget(self.table)
+        self.show_table_view()
 
     # ----- internals -----
 
@@ -1554,8 +1566,6 @@ class PreviewPanel(QWidget):
                 matched_keyword="",  # manual override — clear keyword match
             )
             self.model.set_row(track_idx, new_preview)
-            if not track.selected:
-                self.model.update_selection_for_track(track_idx, True)
             # Keep Track.category in sync for audio-player / organize helpers.
             track.category = (category.name or "").strip()
             touched = True
