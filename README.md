@@ -26,7 +26,7 @@ Default ML path is **torch-free**: ONNX Runtime (`onnxruntime-gpu`, CUDA EP on N
 
 | Tab | What it does |
 |-----|----------------|
-| **Classify** | [Demucs](https://github.com/facebookresearch/demucs) (HTDemucs ONNX) RMS classify → group stems<br>optional [SI-SDR](https://source-separation.github.io/tutorial/basics/evaluation.html#si-sdr) quality filter; export organized folders |
+| **Classify** | **Stem CNN6** (11-class instrument classifier) or [Demucs](https://github.com/facebookresearch/demucs) (HTDemucs ONNX) RMS classify → group stems<br>optional [SI-SDR](https://source-separation.github.io/tutorial/basics/evaluation.html#si-sdr) quality filter; export organized folders |
 | **Genre & Gender** | **Genre** — [MAEST](https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e) genre/style tags<br>**Gender** — [EffNet gender](https://essentia.upf.edu/models.html#voice-gender) (male/female) + In-house trained reverb (dry/wet)<br>**Vocal type** — [PANNs](https://github.com/qiuqiangkong/audioset_tagging_cnn) (Singing/Speech/Rapping/Humming/Choir) |
 | **Key** | In-house trained KeyNet CNN → `KEY` / Initial key — [outperforms](https://docs.google.com/spreadsheets/d/1asmBVlIjimZ9XAmK5JE42SX4vAvjGqjLflukYBgFSuE/edit?usp=sharing) [original model](https://github.com/a1ex90/MusicalKeyCNN/blob/main/checkpoints/keynet.pt) + [MIK](https://mixedinkey.com/) |
 | **Match & Align** | Pair instrumental/vocal folders, organize pairs, align stems to a reference |
@@ -55,39 +55,39 @@ install-deps.bat
 1. Creates `.venv` and installs `requirements.txt` (PySide6, `onnxruntime-gpu`, librosa, flac-detective, …)
 2. Downloads **ffmpeg**, **mp3val**, and **flac** next to the project
 
-Place ONNX weights under `models\` / tagger folders for local runs, or use the installer (downloads from GitHub Release `models`).
+Place ONNX weights under the single root `models\` folder for local runs, or use the installer (downloads from GitHub Release `models`).
 
 ## Build `.exe`
 
 ```bat
 build.bat
-cd dist\STEM-organizer
-install-deps.bat
-STEM-organizer.exe
+dist\STEM-organizer\STEM-organizer.exe
 ```
 
-`build.bat` freezes ML deps from `requirements.txt`. After build, `install-deps.bat` beside the EXE only fetches missing **ffmpeg / mp3val / flac** (ML is already in the freeze).
+`build.bat` freezes ML deps from `requirements.txt`, bundles **ffmpeg / mp3val / flac** beside the EXE, and runs a pre-ship smoke gate (`_smoke_all.py`) against the fresh dist — codec decode, tag writes, and pair matching must pass before the build reports SUCCESS. The EXE runs without `install-deps.bat`.
 
 Installer: compile `stem_organizer.iss` → downloads the 8 ONNX assets from
 [bascurtiz/STEM-organizer-models](https://github.com/bascurtiz/STEM-organizer-models) tag `models`.
 
 ### Model assets
 
-Shipped ONNX set (installer downloads from the models Release; not in source zip):
+Single source: **all weights live in the root `models\` folder** (no per-tagger
+copies). The installer downloads this ONNX set from the models Release (not in
+the source zip):
 
 | Feature | Path |
 |---------|------|
-| Demucs HTDemucs | `models\htdemucs.onnx` |
-| PANNs Cnn14 | `panns_tagger\models\cnn14.onnx` |
-| Stem CNN6 (Rename) | `instrument_tagger\models\stem_cnn6.onnx` |
-| MAEST genre | `genre_gender_tagger\models\maest_discogs519.onnx` |
-| EffNet embeddings | `genre_gender_tagger\models\discogs-effnet-bsdynamic-1.onnx` |
-| Gender EffNet | `genre_gender_tagger\models\gender-discogs-effnet-1.onnx` |
-| Vocal reverb | `genre_gender_tagger\models\vocal_reverb.onnx` |
-| KeyNet | `key_tagger\checkpoints\nf50-q05-221125.onnx` |
+| Demucs HTDemucs (Classify SI-SDR / 4-stem) | `models\htdemucs.onnx` |
+| Stem CNN6 (Classify RMS + Rename Auto-detect) | `models\stem_cnn6.onnx` |
+| PANNs Cnn14 (Vocal type) | `models\cnn14.onnx` |
+| MAEST genre | `models\maest_discogs519.onnx` |
+| EffNet embeddings | `models\discogs-effnet-bsdynamic-1.onnx` |
+| Gender EffNet | `models\gender-discogs-effnet-1.onnx` |
+| Vocal reverb | `models\vocal_reverb.onnx` |
+| KeyNet | `models\nf50-q05-221125.onnx` |
 
-Tiny sidecars in the repo (no weights): `maest_discogs519.id2label.json`,
-`vocal_reverb.config.json`, `panns_tagger\models\class_labels_indices.csv`.
+Tiny sidecars in the repo (no weights): `models\maest_discogs519.id2label.json`,
+`models\vocal_reverb.config.json`, `models\class_labels_indices.csv`.
 
 ## Metadata tags (Charts sources)
 
@@ -107,11 +107,13 @@ Charts reads these tags from your library:
 ```
 STEM-organizer-Py6/
 ├── run_stem_organizer.py      # Entry point
-├── install-deps.bat           # Source: .venv + tools; frozen: tools only
-├── build.bat                  # PyInstaller → dist\STEM-organizer\
+├── install-deps.bat           # Source: .venv + tools; frozen: tools already bundled
+├── build.bat                  # PyInstaller → dist\STEM-organizer\ (+ pre-ship smoke gate)
+├── _smoke_all.py              # Pre-ship gate: codec decode, tag writes, pair matching
 ├── requirements.txt           # Pinned ORT/CUDA + audio stack
 ├── stem_organizer.iss         # Inno Setup (external model download)
 ├── stem_organizer/            # PySide6 UI + dataset tools
+├── models/                    # Single source for all ONNX weights + sidecars
 ├── genre_gender_tagger/       # MAEST + EffNet tagger
 ├── instrument_tagger/         # Stem CNN6 Auto-detect
 ├── panns_tagger/              # PANNs vocal type
