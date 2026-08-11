@@ -268,6 +268,7 @@ class TrackRenamerApp(QWidget):
     _enrich_failed = Signal(object)  # exc
     _rename_finished = Signal(object, object, object)  # success, errors, renamed_paths
     _rename_failed = Signal(object)  # exc
+    _rename_progress = Signal(str, int, int)  # label, done, total
     _organize_finished = Signal(int, object, int, int, object)  # renamed, rename_errors, moved, skipped, move_errors
 
     def __init__(
@@ -313,6 +314,7 @@ class TrackRenamerApp(QWidget):
         self._enrich_failed.connect(self._on_enrich_error)
         self._rename_finished.connect(self._on_rename_done)
         self._rename_failed.connect(self._on_rename_error)
+        self._rename_progress.connect(self._on_rename_progress)
         self._organize_finished.connect(self._on_organize_done)
 
         self._build_ui()
@@ -1058,7 +1060,13 @@ class TrackRenamerApp(QWidget):
             try:
                 # Tagger / AV may still hold shares briefly after Analyze.
                 self.audio_player.service.release_for_file_ops(settle_s=0.4)
-                success, errors, renamed_paths = apply_file_renames_detailed(renames)
+
+                def progress(done: int, total_count: int) -> None:
+                    self._rename_progress.emit("Renaming files", done, total_count)
+
+                success, errors, renamed_paths = apply_file_renames_detailed(
+                    renames, progress=progress
+                )
             except Exception as exc:
                 self._rename_failed.emit(exc)
                 return
@@ -1070,6 +1078,11 @@ class TrackRenamerApp(QWidget):
         self._destructive_busy = False
         show_info(self, "Rename Files", f"Rename failed:\n{exc}")
         self._set_busy(False, "Idle")
+
+    def _on_rename_progress(self, label: str, done: int, total: int) -> None:
+        self._set_busy(True, f"{label} ({done:,}/{total:,})…")
+        if total > 0:
+            self.status_progress.emit(min(1.0, done / total), None, done, total)
 
     def _on_rename_done(self, success: int, errors: List[str], renamed_paths: List[Path]) -> None:
         self._destructive_busy = False
@@ -1108,7 +1121,12 @@ class TrackRenamerApp(QWidget):
 
         def work():
             try:
-                moved, skipped, move_errors = move_files_to_prefix_folders(renamed_paths, Path(dest))
+                def progress(done: int, total_count: int) -> None:
+                    self._rename_progress.emit("Organizing files", done, total_count)
+
+                moved, skipped, move_errors = move_files_to_prefix_folders(
+                    renamed_paths, Path(dest), progress=progress
+                )
             except Exception as exc:
                 self._rename_failed.emit(exc)
                 return

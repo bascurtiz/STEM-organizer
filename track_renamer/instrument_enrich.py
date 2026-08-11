@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -10,7 +11,7 @@ import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from tagger_launch import (
     STEM_SITE_PACKAGES_ENV,
@@ -43,6 +44,8 @@ _CACHE_MAX_ENTRIES = 100_000
 _CACHE: dict[str, tuple] = {}
 _DISK_LOADED = False
 _DISK_DIRTY = False
+# >0 while a batch (e.g. mass rename) suppresses per-call disk flushes.
+_DEFER_FLUSH = 0
 
 # Reused ONNX/torch backend across Analyze runs in this process.
 _INPROC_BACKEND = None
@@ -150,7 +153,7 @@ def _ensure_disk_loaded() -> None:
 
 def _flush_disk_cache() -> None:
     global _DISK_DIRTY
-    if not _DISK_DIRTY:
+    if _DEFER_FLUSH or not _DISK_DIRTY:
         return
     path = _cache_path()
     entries: dict[str, list] = {}
@@ -855,6 +858,25 @@ def clear_instrument_cache() -> None:
         _DISK_DIRTY = False
     except OSError:
         _flush_disk_cache()
+
+
+@contextlib.contextmanager
+def deferred_cache_flush() -> Iterator[None]:
+    """Suppress per-call disk flushes inside a batch, flush once at the end.
+
+    relocate_instrument_cache() rewrites the entire multi-MB cache JSON on
+    every call, so a 10k-file rename would otherwise serialize the whole
+    cache 10k times (O(n^2)). Wrap rename/move loops in this so the cache
+    is written exactly once when the batch completes.
+    """
+    global _DEFER_FLUSH
+    _DEFER_FLUSH += 1
+    try:
+        yield
+    finally:
+        _DEFER_FLUSH -= 1
+        if _DEFER_FLUSH == 0:
+            _flush_disk_cache()
 
 
 def relocate_instrument_cache(old_path: Path, new_path: Path) -> None:

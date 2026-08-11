@@ -164,6 +164,7 @@ def scan_folder(
 
 def apply_file_renames_detailed(
     renames: dict[str, str],
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[int, list[str], list[Path]]:
     """
     Rename files on disk.
@@ -223,34 +224,42 @@ def apply_file_renames_detailed(
 
     # Stage every source first so swaps and targets occupied by another source
     # cannot fail midway through the operation.
+    from track_renamer.instrument_enrich import deferred_cache_flush
+
+    total = len(validated)
+    done = 0
     staged: list[tuple[Path, Path, Path]] = []
-    for source, target in planned:
-        temporary = source.with_name(
-            f".__track_renamer_{uuid.uuid4().hex}{source.suffix}"
-        )
-        try:
-            _rename_with_retry(source, temporary)
-            staged.append((source, temporary, target))
-        except OSError as exc:
-            errors.append(f"{source.name}: {exc}")
-
-    for source, temporary, target in staged:
-        try:
-            _rename_with_retry(temporary, target)
-            success += 1
-            renamed_paths.append(target)
+    with deferred_cache_flush():
+        for source, target in planned:
+            temporary = source.with_name(
+                f".__track_renamer_{uuid.uuid4().hex}{source.suffix}"
+            )
             try:
-                from track_renamer.instrument_enrich import relocate_instrument_cache
+                _rename_with_retry(source, temporary)
+                staged.append((source, temporary, target))
+            except OSError as exc:
+                errors.append(f"{source.name}: {exc}")
 
-                relocate_instrument_cache(source, target)
-            except Exception:
-                pass
-        except OSError as exc:
-            errors.append(f"{source.name}: {exc}")
+        for source, temporary, target in staged:
             try:
-                _rename_with_retry(temporary, source)
-            except OSError as restore_exc:
-                errors.append(f"Could not restore {source.name}: {restore_exc}")
+                _rename_with_retry(temporary, target)
+                success += 1
+                renamed_paths.append(target)
+                try:
+                    from track_renamer.instrument_enrich import relocate_instrument_cache
+
+                    relocate_instrument_cache(source, target)
+                except Exception:
+                    pass
+            except OSError as exc:
+                errors.append(f"{source.name}: {exc}")
+                try:
+                    _rename_with_retry(temporary, source)
+                except OSError as restore_exc:
+                    errors.append(f"Could not restore {source.name}: {restore_exc}")
+            done += 1
+            if progress:
+                progress(done, total)
 
     return success, errors, renamed_paths
 
@@ -264,6 +273,7 @@ def apply_file_renames(renames: dict[str, str]) -> tuple[int, list[str]]:
 def move_files_to_prefix_folders(
     files: list[Path],
     root: Path,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[int, int, list[str]]:
     """
     Move files into ``root / PREFIX`` using their ``PREFIX - name`` pattern.
@@ -276,50 +286,58 @@ def move_files_to_prefix_folders(
     errors: list[str] = []
     root = root.resolve()
 
-    for source_value in files:
-        source = Path(source_value)
-        if not source.is_file():
-            errors.append(f"Missing: {source.name}")
-            continue
+    from track_renamer.instrument_enrich import deferred_cache_flush
 
-        match = _PREFIX_RE.match(source.stem)
-        if not match:
-            skipped += 1
-            continue
+    total = len(files)
+    done = 0
+    with deferred_cache_flush():
+        for source_value in files:
+            source = Path(source_value)
+            if not source.is_file():
+                errors.append(f"Missing: {source.name}")
+                continue
 
-        prefix = match.group(1).strip()
-        if prefix in {"", ".", ".."}:
-            errors.append(f"{source.name}: invalid prefix folder")
-            continue
-        target_folder = root / prefix
-        try:
-            target_folder.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            errors.append(f"{source.name}: could not create {prefix}: {exc}")
-            continue
+            match = _PREFIX_RE.match(source.stem)
+            if not match:
+                skipped += 1
+                continue
 
-        target = target_folder / source.name
-        if source.resolve(strict=False) == target.resolve(strict=False):
-            continue
-
-        suffix = 0
-        candidate = target
-        while candidate.exists():
-            suffix += 1
-            candidate = target.with_name(
-                f"{target.stem}_{suffix}{target.suffix}"
-            )
-
-        try:
-            _move_with_retry(source, candidate)
-            moved += 1
+            prefix = match.group(1).strip()
+            if prefix in {"", ".", ".."}:
+                errors.append(f"{source.name}: invalid prefix folder")
+                continue
+            target_folder = root / prefix
             try:
-                from track_renamer.instrument_enrich import relocate_instrument_cache
+                target_folder.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                errors.append(f"{source.name}: could not create {prefix}: {exc}")
+                continue
 
-                relocate_instrument_cache(source, candidate)
-            except Exception:
-                pass
-        except OSError as exc:
-            errors.append(f"{source.name}: {exc}")
+            target = target_folder / source.name
+            if source.resolve(strict=False) == target.resolve(strict=False):
+                continue
+
+            suffix = 0
+            candidate = target
+            while candidate.exists():
+                suffix += 1
+                candidate = target.with_name(
+                    f"{target.stem}_{suffix}{target.suffix}"
+                )
+
+            try:
+                _move_with_retry(source, candidate)
+                moved += 1
+                try:
+                    from track_renamer.instrument_enrich import relocate_instrument_cache
+
+                    relocate_instrument_cache(source, candidate)
+                except Exception:
+                    pass
+            except OSError as exc:
+                errors.append(f"{source.name}: {exc}")
+            done += 1
+            if progress:
+                progress(done, total)
 
     return moved, skipped, errors
