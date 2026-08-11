@@ -911,7 +911,7 @@ def run_convert_to_flac(
                     _log_file_result(
                         log,
                         Path(payload["src"]),
-                        "ok",
+                        "converted",
                         str(row.get("action") or ""),
                         index=done + 1,
                         total=total,
@@ -969,7 +969,7 @@ def run_convert_to_flac(
                         if result.get("gained"):
                             gained_n += 1
                         _log_file_result(
-                            log, src, "ok", str(row.get("action") or ""),
+                            log, src, "converted", str(row.get("action") or ""),
                             index=done + 1, total=total,
                         )
                     else:

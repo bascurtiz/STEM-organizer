@@ -100,6 +100,7 @@ LOG_GG_COLORS = {
     "fake_certain": "#262833",
     # Integrity → Corruption verdicts
     "ok": theme.LOG_OK_COLOR,
+    "converted": theme.LOG_OK_COLOR,
     "minor": theme.LOG_WARN_COLOR,  # legacy; log maps minor→warning
     "failed": theme.LOG_ERR_COLOR,
     "suspect": theme.LOG_WARN_COLOR,  # legacy; log maps suspect→warning
@@ -138,6 +139,7 @@ LOG_GG_FG = {
     "suspicious": "#262833",
     "fake_certain": theme.COLORS["log_fg"],
     "ok": "#262833",
+    "converted": "#262833",
     "minor": "#262833",
     "failed": "#262833",
     "suspect": "#262833",
@@ -190,7 +192,7 @@ _KEY_BADGE_ALTS = "|".join(
 GG_BADGE_RE = re.compile(
     r"^(\s*)(female|male|dry|wet|lossless|lossy|"
     r"authentic|warning|suspicious|fake_certain|"
-    r"ok|minor|failed|suspect|"
+    r"ok|converted|minor|failed|suspect|"
     r"singing|speech|rapping|humming|choir|"
     + _KEY_BADGE_ALTS
     + r")"
