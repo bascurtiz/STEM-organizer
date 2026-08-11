@@ -36,7 +36,6 @@ def resolve_tokens(
         "counter": str(counter),
         "index": str(index),
         "is_audio": "1" if track.is_audio else "0",
-        "is_midi": "1" if track.is_midi else "0",
         "is_group": "1" if track.is_group else "0",
     }
     for key, value in variables.items():

@@ -58,7 +58,6 @@ DARK = {
     "waveform_axis":   "#343647",
     "waveform_playhead": "#ffffff",  # 1px scrubber — keep pure white for punch
     "audio":           "#10b981",
-    "midi":            COLORS["accent"],
     "group":           "#a855f7",
     "danger":          COLORS["danger"],
     "badge_fg":        COLORS["log_fg"],  # soft white (#d6dae8)

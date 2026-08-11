@@ -8,7 +8,7 @@ from typing import Any, Literal
 import uuid
 
 
-TrackType = Literal["audio", "midi", "group", "return", "master"]
+TrackType = Literal["audio", "group", "return", "master"]
 
 
 def new_id(prefix: str) -> str:
@@ -53,10 +53,6 @@ class Track:
     @property
     def is_audio(self) -> bool:
         return self.track_type == "audio"
-
-    @property
-    def is_midi(self) -> bool:
-        return self.track_type == "midi"
 
 
 @dataclass

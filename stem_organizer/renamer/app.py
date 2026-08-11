@@ -356,7 +356,6 @@ class TrackRenamerApp(QWidget):
         title.setWordWrap(False)
         header.addWidget(title, 0, Qt.AlignLeft | Qt.AlignVCenter)
         self.help_icon = InfoIcon(self, on_click=lambda: show_rename_help_dialog(self))
-        self.help_icon.setToolTip(TIPS["help"])
         header.addWidget(self.help_icon, 0, Qt.AlignVCenter)
         header.addStretch(1)
         left_lay.addLayout(header)
@@ -433,7 +432,7 @@ class TrackRenamerApp(QWidget):
         self.samplepack_chk = CheckBox("Samplepack")
         self.samplepack_chk.setChecked(False)
         self.samplepack_chk.setToolTip(
-            "Detect instrument labels from sample pack filenames. "
+            "Detect instrument labels from sample pack filenames.\n"
             "After scanning, click a filename segment to identify the label pattern."
         )
         self.samplepack_chk.toggled.connect(self._on_samplepack_toggle)

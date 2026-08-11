@@ -17,8 +17,7 @@ PREVIEW_LOG_PCT_FONT_SIZE = 8
 TIPS = {
     "preset": "Load a saved rule preset.",
     "save_preset": "Save the current rule stack as a preset.",
-    "open_folder": "Scan a folder for audio and MIDI files to rename.",
-    "help": "How rules work and supported file types.",
+    "open_folder": "Scan a folder for audio files to rename.",
     "delete_preset": "Delete the selected template.",
     "recursive": "Also scan files inside subfolders of the selected directory.",
     "apply_preview": "Update the preview list with the current rules. Does not run Auto-detect — use Analyze for that.",

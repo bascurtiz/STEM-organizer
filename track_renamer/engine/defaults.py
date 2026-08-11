@@ -244,7 +244,7 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
-TITLE_CASE_ACRONYMS = "FX, KSHMR, DnB, EDM, ID, USA, UK, OG, BPM, DJ, LFO, MIDI, NYC, LA, DAW"
+TITLE_CASE_ACRONYMS = "FX, KSHMR, DnB, EDM, ID, USA, UK, OG, BPM, DJ, LFO, NYC, LA, DAW"
 
 # Stem CNN6 instrument label (lowercased) → Category Macro row. The 11 keys
 # match STEM_CLASSES in instrument_tagger.py 1:1.
@@ -405,8 +405,8 @@ def make_demo_tracks() -> list[Track]:
         ("15-Audio", ".wav", "audio"),
         ("16-Audio", ".wav", "audio"),
         ("17-Group", ".wav", "group"),
-        ("18-MIDI", ".mid", "midi"),
-        ("19-MIDI", ".mid", "midi"),
+        ("18-Audio", ".wav", "audio"),
+        ("19-Audio", ".wav", "audio"),
         ("20-Audio", ".wav", "audio"),
         ("21-Audio", ".wav", "audio"),
         ("22-Audio", ".wav", "audio"),
@@ -415,13 +415,11 @@ def make_demo_tracks() -> list[Track]:
         ("25-Audio", ".wav", "audio"),
         ("26-Audio", ".wav", "audio"),
         ("27-Audio", ".wav", "audio"),
-        ("28-Audio", ".wav", "audio"),
-        ("29-Audio", ".wav", "audio"),
     ]
     tracks: list[Track] = []
     group_id = "demo-folder/17-Group"
     for index, (stem, ext, kind) in enumerate(demo_names, start=1):
-        parent = group_id if stem in ("18-MIDI", "19-MIDI", "20-Audio") else None
+        parent = group_id if stem in ("18-Audio",) else None
         depth = 1 if parent else 0
         fake_path = Path("demo-folder") / f"{stem}{ext}"
         tracks.append(

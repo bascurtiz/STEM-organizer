@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
-from track_renamer.engine.models import Track, TrackType
+from track_renamer.engine.models import Track
 
 
 def _is_sharing_violation(exc: OSError) -> bool:
@@ -64,21 +64,12 @@ def _move_with_retry(
 
 
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".aiff", ".aif", ".flac", ".ogg", ".m4a", ".opus", ".wma"}
-MIDI_EXTENSIONS = {".mid", ".midi"}
-DEFAULT_EXTENSIONS = AUDIO_EXTENSIONS | MIDI_EXTENSIONS
+DEFAULT_EXTENSIONS = AUDIO_EXTENSIONS
 
 _BPM_RE = re.compile(r"\b(\d{2,3})\s*bpm\b", re.I)
 _KEY_RE = re.compile(r"\b([A-G][#b]?(?:m|min|maj|major|minor)?)\b", re.I)
 _PREFIX_RE = re.compile(r"^\s*(.+?)\s+-\s+")
 
-
-def _track_type_for_extension(ext: str) -> TrackType:
-    ext = ext.lower()
-    if ext in MIDI_EXTENSIONS:
-        return "midi"
-    if ext in AUDIO_EXTENSIONS:
-        return "audio"
-    return "audio"
 
 
 def _parse_filename_metadata(stem: str) -> tuple[str, str]:
@@ -131,7 +122,7 @@ def scan_folder(
             Track(
                 id=str(path),
                 name=stem,
-                track_type=_track_type_for_extension(path.suffix.lower()),
+                track_type="audio",
                 parent_id=str(path.parent) if depth > 0 else None,
                 depth=depth,
                 file_path=path,
