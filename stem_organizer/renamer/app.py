@@ -256,9 +256,10 @@ class TrackRenamerApp(QWidget):
     status_text = Signal(str)
     status_running = Signal()
     status_idle = Signal(str)
+    status_progress = Signal(float, object, int, int)  # pct, eta, done, total
     log_line = Signal(str, str)
     # Worker → UI (auto queued across threads)
-    _scan_progress = Signal(int, int)  # generation, count
+    _scan_progress = Signal(int, int, int)  # generation, done, total
     _scan_finished = Signal(object, object, object, int)  # path, tracks, error, generation
     _enrich_status = Signal(int, str)  # generation, message
     _enrich_progress = Signal(int, int, int)  # generation, done, total
@@ -696,10 +697,10 @@ class TrackRenamerApp(QWidget):
         self.audio_player.reset()
         self._set_busy(True, "Scanning…")
 
-        def progress(count: int) -> None:
+        def progress(done: int, total_count: int) -> None:
             if generation != self._scan_generation:
                 return
-            self._scan_progress.emit(generation, count)
+            self._scan_progress.emit(generation, done, total_count)
 
         def work():
             try:
@@ -712,10 +713,13 @@ class TrackRenamerApp(QWidget):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_scan_progress(self, generation: int, count: int) -> None:
+    def _on_scan_progress(self, generation: int, done: int, total: int) -> None:
         if generation != self._scan_generation or not self._busy:
             return
-        self._set_busy(True, f"Scanning… {count:,} files found")
+        self._set_busy(True, f"Scanning… {done:,}/{total:,} files")
+        # Drive the shared status bar: % + ETA-from-pace while the scan walks.
+        if total > 0:
+            self.status_progress.emit(min(1.0, done / total), None, done, total)
 
     def _on_scan_done(self, path, tracks, error, generation: int | None = None) -> None:
         if generation is not None and generation != self._scan_generation:
@@ -916,6 +920,9 @@ class TrackRenamerApp(QWidget):
         if generation != self._enrich_generation:
             return
         self._set_busy(True, f"Analyzing instruments ({done:,}/{total:,})…")
+        # Drive the shared status bar (progress % + ETA-from-pace) like the other tabs.
+        if total > 0:
+            self.status_progress.emit(min(1.0, done / total), None, done, total)
 
     def _on_enrich_result(self, generation: int, row: object) -> None:
         if generation != self._enrich_generation or not isinstance(row, dict):
@@ -1737,30 +1744,45 @@ class TrackRenamerApp(QWidget):
         """Extract labels from all tracks using the selected segment index.
 
         Normalizes trailing digits so 'Synth Poly 1', 'Synth Poly 2', 'Synth Poly 3'
-        all become one bucket 'Synth Poly'.
+        all become one bucket 'Synth Poly'. Runs on the UI thread but reports
+        per-file progress to the shared status bar (the total is known up front:
+        len(self.tracks)), so huge sample packs show % + ETA and paint between
+        batches instead of freezing.
         """
         _trailing_digits = re.compile(r"\s+\d+$")
         labels: dict[str, int] = {}
         idx = self._samplepack_segment_idx
         if idx < 0:
             return
-        for track in self.tracks:
-            segments = _split_label_segments(track.name)
-            if len(segments) > idx:
-                label = segments[idx].strip()
-                if label:
-                    # Merge trailing-number variants into one bucket
-                    label = _trailing_digits.sub("", label).strip()
+        total = len(self.tracks)
+        from PySide6.QtWidgets import QApplication
+
+        self._set_busy(True, f"Detecting sample labels (0/{total:,})…")
+        try:
+            for n, track in enumerate(self.tracks, 1):
+                segments = _split_label_segments(track.name)
+                if len(segments) > idx:
+                    label = segments[idx].strip()
                     if label:
-                        labels[label] = labels.get(label, 0) + 1
-        self._samplepack_labels = labels
-        self.rules_panel.set_samplepack_labels(
-            labels,
-            self._on_samplepack_label_clicked,
-            self._repick_samplepack_segment,
-            self._auto_assign_samplepack_labels,
-            self._on_samplepack_label_find,
-        )
+                        # Merge trailing-number variants into one bucket
+                        label = _trailing_digits.sub("", label).strip()
+                        if label:
+                            labels[label] = labels.get(label, 0) + 1
+                if n % 500 == 0 or n == total:
+                    self._set_busy(True, f"Detecting sample labels ({n:,}/{total:,})…")
+                    if total > 0:
+                        self.status_progress.emit(min(1.0, n / total), None, n, total)
+                    QApplication.processEvents()
+        finally:
+            self._samplepack_labels = labels
+            self.rules_panel.set_samplepack_labels(
+                labels,
+                self._on_samplepack_label_clicked,
+                self._repick_samplepack_segment,
+                self._auto_assign_samplepack_labels,
+                self._on_samplepack_label_find,
+            )
+            self._set_busy(False, "Idle")
 
     def _on_samplepack_label_find(self, label: str, chip_widget=None) -> None:
         """Right-click a samplepack chip → select the first preview file that

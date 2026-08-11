@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import time
@@ -89,14 +90,34 @@ def scan_folder(
     *,
     recursive: bool = True,
     extensions: set[str] | None = None,
-    progress: Callable[[int], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[Track]:
-    """Scan a folder and return one Track per matching file."""
+    """Scan a folder and return one Track per matching file.
+
+    *progress* is called with (done, total). total comes from a fast pre-count
+    pass (bare os.walk, no Track objects), so a UI can show % and ETA while the
+    scan runs. When *progress* is None the pre-count pass is skipped entirely.
+    """
     root = root.resolve()
     if not root.is_dir():
         raise NotADirectoryError(f"Not a folder: {root}")
 
     allowed = {e.lower() if e.startswith(".") else f".{e.lower()}" for e in (extensions or DEFAULT_EXTENSIONS)}
+
+    def matches(name: str) -> bool:
+        return os.path.splitext(name)[1].lower() in allowed
+
+    total = 0
+    if progress is not None:
+        # Fast pre-count: bare os.walk, no Path objects — cheap enough to afford
+        # a second pass, and it gives the UI a real total for % and ETA.
+        if recursive:
+            for _dirpath, _dirnames, filenames in os.walk(root, onerror=lambda _exc: None):
+                total += sum(1 for fn in filenames if matches(fn))
+        else:
+            with os.scandir(root) as it:
+                total += sum(1 for e in it if e.is_file() and matches(e.name))
+
     paths: list[Path] = []
 
     iterator = root.rglob("*") if recursive else root.glob("*")
@@ -106,8 +127,8 @@ def scan_folder(
         if path.suffix.lower() not in allowed:
             continue
         paths.append(path)
-        if progress and len(paths) % 1000 == 0:
-            progress(len(paths))
+        if progress and len(paths) % 500 == 0:
+            progress(len(paths), total)
 
     paths.sort()
     tracks: list[Track] = []
@@ -133,11 +154,11 @@ def scan_folder(
                 key=key,
             )
         )
-        if progress and len(tracks) % 1000 == 0:
-            progress(len(tracks))
+        if progress and len(tracks) % 500 == 0:
+            progress(len(tracks), total)
 
     if progress:
-        progress(len(tracks))
+        progress(len(tracks), total)
     return tracks
 
 

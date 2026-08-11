@@ -51,4 +51,5 @@ def register(window: "MainWindow", settings: SettingsStore) -> None:
     tab.app.status_running.connect(lambda: window.status_bar.show_running())
     tab.app.status_idle.connect(window.status_bar.show_idle)
     tab.app.status_text.connect(window.status_bar.set_status)
+    tab.app.status_progress.connect(window.status_bar.update_progress)
     tab.app.log_line.connect(window.append_log)
