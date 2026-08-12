@@ -34,11 +34,15 @@ def _tagger_script() -> Path:
     return instrument_tagger_script()
 
 
-# Bump when model/label set / primary-pick policy changes so stale cache dies.
-_CACHE_MODEL = "stem-cnn6-v1"
+# Bump when model/label set / primary-pick / confidence policy changes.
+_CACHE_MODEL = "stem-cnn6-v2"
 _CACHE_FILE = "instrument_stem_cnn6_cache.json"
 _CACHE_VERSION = 1
 _CACHE_MAX_ENTRIES = 100_000
+
+# Match Classify RMS defaults (Confidence 40% / Min. margin 20%).
+DEFAULT_INSTRUMENT_CONFIDENCE = 0.40
+DEFAULT_INSTRUMENT_MIN_MARGIN = 0.20
 
 # path → (mtime_ns, label, score, second_score, model_id)
 _CACHE: dict[str, tuple] = {}
@@ -181,12 +185,38 @@ def classify_decision(
     score: float = 0.0,
     *,
     second_score: float = 0.0,
+    threshold: float | None = None,
+    min_margin: float | None = None,
 ) -> tuple[str, str]:
-    """Return (action, category_name). action: 'apply' | 'skip_unmap'."""
-    _ = (score, second_score)
+    """Return (action, category_name).
+
+    Actions: ``apply`` | ``skip_unmap`` | ``skip_confidence`` | ``skip_margin``
+    | ``skip_both``. Confidence / margin match Classify RMS defaults (40% / 20%)
+    unless overridden.
+    """
+    thr = (
+        DEFAULT_INSTRUMENT_CONFIDENCE
+        if threshold is None
+        else max(0.0, float(threshold))
+    )
+    mar = (
+        DEFAULT_INSTRUMENT_MIN_MARGIN
+        if min_margin is None
+        else max(0.0, float(min_margin))
+    )
     category = map_instrument_to_category(label)
     if not category:
         return "skip_unmap", category
+
+    top_share = float(score or 0.0)
+    runner = float(second_score or 0.0)
+    margin = top_share - runner
+    if top_share < thr and margin < mar:
+        return "skip_both", category
+    if top_share < thr:
+        return "skip_confidence", category
+    if margin < mar:
+        return "skip_margin", category
     return "apply", category
 
 
@@ -221,7 +251,8 @@ def apply_cached_labels(tracks: list[Track]) -> int:
         track.instrument = label
         track.instrument_score = score
         track.instrument_second = float(second)
-        track.category = map_instrument_to_category(label)
+        action, category = classify_decision(label, score, second_score=float(second))
+        track.category = category if action == "apply" else ""
         filled += 1
     return filled
 
@@ -243,14 +274,13 @@ def _paths_needing_infer(tracks: list[Track]) -> list[Path]:
 
 
 def _second_from_row(row: dict) -> float:
-    """Runner-up share. Worker score is calibrated p1/(p1+p2) → second = 1-score."""
+    """Runner-up softmax share (p2) for margin checks vs top score (p1)."""
     try:
-        score = float(row.get("score") or 0.0)
-        if 0.0 < score <= 1.0:
-            return max(0.0, 1.0 - score)
+        if row.get("second_score") is not None:
+            return max(0.0, float(row.get("second_score") or 0.0))
         top = row.get("top") or []
         if isinstance(top, list) and len(top) >= 2:
-            return float(top[1][1])
+            return max(0.0, float(top[1][1]))
     except (TypeError, ValueError, IndexError):
         pass
     return 0.0

@@ -959,6 +959,12 @@ class TrackRenamerApp(QWidget):
             )
             return
         action, category = classify_decision(label, score, second_score=second)
+        reason = {
+            "skip_unmap": "unmapped",
+            "skip_confidence": "didn't match confidence",
+            "skip_margin": "didn't match min. margin",
+            "skip_both": "didn't match confidence + min. margin",
+        }.get(action, "")
         self.preview_panel.append_analyze_log(
             filename=name,
             action=action,
@@ -967,6 +973,7 @@ class TrackRenamerApp(QWidget):
             label=label,
             done=done,
             total=total,
+            reason=reason,
         )
 
     def _on_enrich_error(self, exc: Exception) -> None:

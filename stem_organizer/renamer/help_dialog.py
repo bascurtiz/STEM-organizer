@@ -162,7 +162,9 @@ def show_rename_help_dialog(parent: Optional[QWidget] = None) -> None:
     layout.addWidget(_help_section_card(
         card, "Sources",
         "Auto-detect uses a Stem CNN6 instrument classifier (11 classes, "
-        "trained on isolated-stem samples), mapped to Category Macro PREFIX rows.",
+        "trained on isolated-stem samples), mapped to Category Macro PREFIX rows. "
+        "Same confidence gate as Classify RMS (default 40% top score, 20% margin "
+        "over runner-up); below that the file is skipped for audio-based category.",
         text_max_width=_RENAME_HELP_TEXT_MAX,
     ))
 
