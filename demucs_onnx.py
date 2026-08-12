@@ -433,6 +433,8 @@ _DEMUCS_SESSION_CACHE: dict[tuple, object] = {}
 # Serialize creation: the background warm-up and a run's first load can race;
 # both would otherwise see an empty cache and build two sessions back-to-back.
 _DEMUCS_SESSION_LOCK: object = None  # set to threading.Lock() on first use
+# Sessions that already ran DemucsOnnxModel._warmup (skip on later wrappers).
+_DEMUCS_WARMUP_DONE: set[int] = set()
 
 
 def _session_lock():
@@ -447,6 +449,42 @@ def _session_lock():
 def _session_cache_key(path: Path, providers: list) -> tuple:
     names = tuple(p[0] if isinstance(p, tuple) else p for p in providers)
     return (str(path), names)
+
+
+def _cache_path_candidates(onnx_path: Path) -> list[Path]:
+    """Paths that ``ensure_batch_dynamic_onnx`` may use as the session key."""
+    src = Path(onnx_path)
+    out = [src]
+    if not (src.name.endswith(".batch.onnx") or src.stem.endswith(".batch")):
+        out.append(src.with_name(f"{src.stem}.batch{src.suffix}"))
+    return out
+
+
+def demucs_session_ready(*, prefer_gpu: bool = True) -> bool:
+    """True when the HTDemucs ORT session is already in the process cache.
+
+    Cheap check — does not open a session or rewrite the ONNX graph.
+    """
+    onnx_path = resolve_htdemucs_onnx()
+    if onnx_path is None:
+        return False
+    providers = _demucs_providers(want_gpu=bool(prefer_gpu))
+    for path in _cache_path_candidates(onnx_path):
+        key = _session_cache_key(path, providers)
+        if _DEMUCS_SESSION_CACHE.get(key) is not None:
+            return True
+    return False
+
+
+def warm_demucs_session(*, prefer_gpu: bool = True) -> bool:
+    """Deprecated in-process warm — would freeze the GUI (ORT holds the GIL).
+
+    Use ``demucs_sidecar_client.start_demucs_sidecar_warm`` instead. This stub
+    only reports whether a session is already cached in *this* process.
+    """
+    if demucs_session_ready(prefer_gpu=bool(prefer_gpu)):
+        return True
+    return False
 
 
 def _open_demucs_session(onnx_path: Path, *, want_gpu: bool):
@@ -495,6 +533,9 @@ class DemucsOnnxModel:
 
     def _warmup(self) -> None:
         """Dummy segments for common packed batch sizes so cuDNN/ORT allocate early."""
+        sid = id(self.session)
+        if sid in _DEMUCS_WARMUP_DONE:
+            return
         try:
             for b in (1, demucs_max_batch()):
                 runner = self._runners.get(b)
@@ -503,6 +544,7 @@ class DemucsOnnxModel:
                     self._runners[b] = runner
                 runner.chunk.fill(0)
                 runner.infer()
+            _DEMUCS_WARMUP_DONE.add(sid)
         except Exception:
             pass
 

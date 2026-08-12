@@ -52,6 +52,8 @@ datas += [('key_tagger/model.py', 'key_tagger')]
 datas += [('key_tagger/log_pace.py', 'key_tagger')]
 datas += [('key_tagger/requirements.txt', 'key_tagger')]
 datas += [('demucs_onnx.py', '.')]
+datas += [('demucs_sidecar.py', '.')]
+datas += [('demucs_sidecar_client.py', '.')]
 datas += [('stem_cnn6_onnx.py', '.')]
 datas += [('ort_util.py', '.')]
 
@@ -103,7 +105,8 @@ hiddenimports += list(_PYSIDE6_KEEP)
 hiddenimports += ['shiboken6']
 hiddenimports += ['classify_backend', 'pair_matcher', 'stem_align',
                   'ffmpeg_bootstrap', 'mp3val_bootstrap', 'flac_bootstrap', 'deps_bootstrap', 'tagger_launch',
-                  'demucs_onnx', 'stem_cnn6_onnx', 'ort_util',
+                  'demucs_onnx', 'demucs_sidecar', 'demucs_sidecar_client',
+                  'stem_cnn6_onnx', 'ort_util',
                   'resource_monitor',
                   'update_checker', 'single_instance', 'done_sound',
                   'audio_resample',

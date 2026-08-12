@@ -203,11 +203,9 @@ def warm_cuda_context() -> bool:
     Building the HTDemucs CUDA session costs ~17 s because ORT lazily
     initializes the CUDA runtime, cuDNN and cuBLAS handles on the process's
     first CUDA session. Creating a small session first (any small ONNX in
-    models\) absorbs that one-time init, so the HTDemucs session later loads
-    in ~5 s — the model load itself. The splash no longer waits on the full
-    session: startup stays fast and the first SI-SDR / separation run creates
-    the session lazily with a short "Loading model …" pause instead of the
-    old ~17 s freeze.
+    models\) absorbs that one-time init for *this* process. Full HTDemucs
+    warms in a sidecar child (``start_demucs_idle_warm``) so the GUI GIL
+    stays free.
     """
     global _WARM_SESSION
     if _WARM_SESSION is not None:
@@ -254,6 +252,58 @@ def warm_cuda_context() -> bool:
         return False
 
 
+_DEMUCS_IDLE_WARM_STARTED = False
+
+
+def demucs_session_ready(*, prefer_gpu: bool = True) -> bool:
+    """True when HTDemucs is warm (sidecar child, or in-process cache fallback)."""
+    if prefer_gpu and os.environ.get("STEM_DEMUCS_SIDECAR", "1").strip() != "0":
+        try:
+            from demucs_sidecar_client import demucs_sidecar_ready
+
+            if demucs_sidecar_ready():
+                return True
+        except Exception:
+            pass
+    try:
+        from demucs_onnx import demucs_session_ready as _ready
+
+        return bool(_ready(prefer_gpu=bool(prefer_gpu)))
+    except Exception:
+        return False
+
+
+def warm_demucs_session(*, prefer_gpu: bool = True) -> bool:
+    """Warm HTDemucs in the sidecar child (never in the GUI process)."""
+    if not prefer_gpu:
+        return False
+    try:
+        from demucs_sidecar_client import get_client
+
+        return bool(get_client().warm(prefer_gpu=True))
+    except Exception:
+        return False
+
+
+def start_demucs_idle_warm() -> None:
+    """Spawn the Demucs sidecar and warm HTDemucs in that child process.
+
+    Call after the main window is shown (not from splash). Opt out with
+    ``STEM_DEMUCS_IDLE_WARM=0`` or ``STEM_DEMUCS_SIDECAR=0``.
+    """
+    global _DEMUCS_IDLE_WARM_STARTED
+    if _DEMUCS_IDLE_WARM_STARTED:
+        return
+    if os.environ.get("STEM_DEMUCS_IDLE_WARM", "1").strip() == "0":
+        return
+    _DEMUCS_IDLE_WARM_STARTED = True
+    try:
+        from demucs_sidecar_client import start_demucs_sidecar_warm
+
+        start_demucs_sidecar_warm(prefer_gpu=True)
+    except Exception:
+        pass
+
 
 def _onnx_demucs_wanted() -> bool:
     """True when any ONNX stem-separation weight is present."""
@@ -290,6 +340,18 @@ def load_demucs_model(model_id: str, *, prefer_gpu: bool = False):
         mid = "htdemucs"
 
     if mid == "htdemucs":
+        # GPU path: prefer sidecar so ORT never holds the GUI process GIL.
+        if (
+            prefer_gpu
+            and os.environ.get("STEM_DEMUCS_SIDECAR", "1").strip() != "0"
+            and os.environ.get("STEM_ORT_FORCE_CPU", "").strip() != "1"
+        ):
+            try:
+                from demucs_sidecar_client import load_sidecar_model
+
+                return load_sidecar_model(prefer_gpu=True)
+            except Exception:
+                pass
         from demucs_onnx import DemucsOnnxModel, resolve_htdemucs_onnx
 
         onnx_path = resolve_htdemucs_onnx()
@@ -2425,7 +2487,7 @@ class Worker(threading.Thread):
 
         self.log('Starting RMS classification...')
         t0 = time.monotonic()
-        for path, energies, err, _fine in classify_batch(model, stems, device, batch_size=int(self.p['batch_size']), stop_event=self._stop_event):
+        for path, energies, err, fine in classify_batch(model, stems, device, batch_size=int(self.p['batch_size']), stop_event=self._stop_event):
             self._mark_stems_done(1)
             if self._stop_event.is_set():
                 # Outer folder loop logs "Stopped by user." once
@@ -2440,9 +2502,11 @@ class Worker(threading.Thread):
                 continue
             label, _, top_share, _margin, skip_reason = classify_to_category(
                 energies, mode_cfg, float(self.p['threshold']), float(self.p['min_margin']))
-            # Coarse bucket only — the fine 11-class label (organ/guitar/…)
-            # stays internal; the log badge shows bass/drums/other/vocals.
-            self.log(f"  {label} {top_share:.0%}  →  {path.name}")
+            # Coarse bucket drives folder layout; the optional fine 11-class
+            # label (organ/guitar/…) only refines the log badge when the user
+            # opts in via 'Show instrument names'. fine is None for HTDemucs.
+            display_label = fine.lower() if (self.p.get('show_instrument_names') and fine) else label
+            self.log(f"  {display_label} {top_share:.0%}  →  {path.name}")
             if label == 'skip':
                 skipped += 1
                 had_ambig = True

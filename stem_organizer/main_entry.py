@@ -108,6 +108,14 @@ def run(argv: list[str] | None = None) -> int:
             f"{existing};{_font_rule}" if existing else _font_rule
         )
 
+    # Demucs ORT sidecar (child process) — never build the GUI.
+    if any(a == "--run-demucs-sidecar" for a in argv):
+        os.environ["STEM_DEMUCS_CHILD"] = "1"
+        os.environ.setdefault("STEM_ALLOW_MULTI", "1")
+        from demucs_sidecar import main as _demucs_sidecar_main
+
+        return int(_demucs_sidecar_main() or 0)
+
     app = QApplication.instance() or QApplication(argv)
     app.setApplicationName("STEM organizer")
     app.setApplicationDisplayName("STEM organizer")
@@ -126,6 +134,8 @@ def run(argv: list[str] | None = None) -> int:
         if os.environ.get("STEM_ALLOW_MULTI", "").strip() not in ("1", "true", "True", "yes", "YES"):
             if os.environ.get("STEM_TAGGER_CHILD", "").strip() in ("1", "true", "True"):
                 pass  # tagger self-dispatch child — no mutex
+            elif os.environ.get("STEM_DEMUCS_CHILD", "").strip() in ("1", "true", "True"):
+                pass  # Demucs sidecar child — no mutex
             elif not acquire_single_instance():
                 # Pool workers re-exec the frozen .exe — exit quiet, no dialog.
                 if _is_multiprocessing_child():
@@ -245,9 +255,18 @@ def _construct_and_show(
         except Exception:
             pass
 
-        # HTDemucs loads lazily on the first SI-SDR / separation run (the
-        # worker logs "Loading model …" and the session is cached for the rest
-        # of the session) — no background warm, no post-launch GIL stall.
+        # Idle-warm HTDemucs in a *sidecar child process* after first paint.
+        # In-process ORT session create holds the GIL and freezes Qt; the child
+        # pays that cost instead so Classify / SI-SDR Start hits a warm session.
+        def _kick_demucs_idle_warm() -> None:
+            try:
+                import classify_backend as _cb
+
+                _cb.start_demucs_idle_warm()
+            except Exception:
+                pass
+
+        QTimer.singleShot(2500, _kick_demucs_idle_warm)
     except Exception:
         if splash is not None:
             splash.close()

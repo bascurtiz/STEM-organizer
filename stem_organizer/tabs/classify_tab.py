@@ -258,6 +258,14 @@ class ClassifyTab(QWidget):
         )
         self.use_cuda = CheckBox("Use CUDA (GPU)")
         self._configure_cuda_checkbox()
+        self.show_instrument_names = CheckBox("Show instrument names")
+        self.show_instrument_names.setToolTip(
+            theme.format_tooltip(
+                "Stem CNN6 only. Show the detected instrument (flute, organ, "
+                "guitar, …) in the log instead of the generic 'other' bucket. "
+                "Folder layout is unaffected."
+            )
+        )
 
         self._place_combo(opts_grid, 0, 0, "Model", self.model_combo)
         self._place_combo(opts_grid, 0, 2, "Stems", self.stem_combo)
@@ -273,6 +281,7 @@ class ClassifyTab(QWidget):
         self._place_combo(opts_grid, 1, 0, "Quality", self.quality_combo)
         opts_grid.addWidget(self.use_cuda, 1, 2, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
         self._place_combo(opts_grid, 2, 0, "Ambiguous", self.ambig_combo)
+        opts_grid.addWidget(self.show_instrument_names, 2, 2, 1, 2, Qt.AlignLeft | Qt.AlignVCenter)
 
         opts.body.layout().addWidget(opts_grid_host)
         self._inner_layout.addWidget(opts)
@@ -574,7 +583,8 @@ class ClassifyTab(QWidget):
                 "Stem CNN6 — 11-class instrument classifier (~6M params). "
                 "Predicts BASS/DRUMS/FLUTE/FX/GUITAR/KEYS/ORGAN/STRINGS/"
                 "SYNTH/VOCALS/WINDS in one fast forward pass (~10 ms/clip on GPU), "
-                "no stem separation needed. The log shows the fine label; "
+                "no stem separation needed. Enable 'Show instrument names' (Options) "
+                "to display the detected instrument (flute/organ/…) in the log; "
                 "bucketing collapses to 2-stem (vocals/instrumental) or "
                 "4-stem (vocals/bass/drums/other). "
                 "For SI-SDR quality scoring, use HTDemucs (SI-SDR always "
@@ -717,6 +727,15 @@ class ClassifyTab(QWidget):
         # Immediate feedback before the worker thread spins up (CUDA probe /
         # model load can take seconds before the first backend log line).
         self.request_log.emit("  Starting…", "")
+        model_id = params.get("model_id") or ""
+        if model_id != "vocal_cnn6" and params.get("use_cuda"):
+            if cb.demucs_session_ready(prefer_gpu=True):
+                self.request_log.emit("  Demucs ready.", "")
+            else:
+                self.request_log.emit(
+                    "  Waiting for Demucs warm (first load ~15-20s)…",
+                    "warn",
+                )
         self._worker = ClassifyWorker(params, parent=self)
         self._wire_worker(self._worker)
         self.set_running(True)
@@ -786,10 +805,15 @@ class ClassifyTab(QWidget):
             return
         self._apply_sdr_process_all_prompts(params, result)
         self._worker_kind = "sdr"
-        self._show_warmup_overlay(
-            "Initializing demucs model…\n(first run only - takes ~15-20s)"
-        )
-        self.request_log.emit("  Starting…", "")
+        prefer_gpu = bool(params.get("use_cuda"))
+        if prefer_gpu and cb.demucs_session_ready(prefer_gpu=True):
+            self._hide_warmup_overlay()
+            self.request_log.emit("  Starting… (Demucs ready)", "")
+        else:
+            self._show_warmup_overlay(
+                "Initializing demucs model…\n(first run only - takes ~15-20s)"
+            )
+            self.request_log.emit("  Starting…", "")
         self._worker = SdrClassifyWorker(params, parent=self)
         self._wire_worker(self._worker)
         # Already in running UI state from preflight.
@@ -1021,6 +1045,7 @@ class ClassifyTab(QWidget):
             "min_duration_sec": int(self.min_duration_sec.value()),
             "delete_if_incomplete": self.delete_if_incomplete.isChecked(),
             "skip_existing": self.skip_existing.isChecked(),
+            "show_instrument_names": self.show_instrument_names.isChecked(),
         }
 
     # ----- help --------------------------------------------------------
@@ -1171,6 +1196,7 @@ class ClassifyTab(QWidget):
             "min_duration_sec": int(self.min_duration_sec.value()),
             "delete_if_incomplete": bool(self.delete_if_incomplete.isChecked()),
             "skip_existing": bool(self.skip_existing.isChecked()),
+            "show_instrument_names": bool(self.show_instrument_names.isChecked()),
             "sdr_delete_folder": bool(self.sdr_delete_folder.isChecked()),
             "write_sdr_tags": bool(self.sdr_write_tags.isChecked()),
             "sdr_thresholds": dict(self._sdr_thresholds),
@@ -1225,6 +1251,7 @@ class ClassifyTab(QWidget):
                 self.min_duration_sec.setValue(int(d["min_duration_sec"]))
             self.delete_if_incomplete.setChecked(bool(d.get("delete_if_incomplete", False)))
             self.skip_existing.setChecked(bool(d.get("skip_existing", True)))
+            self.show_instrument_names.setChecked(bool(d.get("show_instrument_names", False)))
             self.sdr_delete_folder.setChecked(bool(d.get("sdr_delete_folder", True)))
             self.sdr_write_tags.setChecked(bool(d.get("write_sdr_tags", True)))
             stored = d.get("sdr_thresholds")
@@ -1277,6 +1304,7 @@ class ClassifyTab(QWidget):
             self.min_duration_sec.valueChanged,
             self.delete_if_incomplete.toggled,
             self.skip_existing.toggled,
+            self.show_instrument_names.toggled,
             self.sdr_delete_folder.toggled,
             self.sdr_write_tags.toggled,
         ):
