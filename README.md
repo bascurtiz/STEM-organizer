@@ -27,11 +27,11 @@ Default ML path is **torch-free**: ONNX Runtime (`onnxruntime-gpu`, CUDA EP on N
 | Tab | What it does |
 |-----|----------------|
 | **Classify** | **Stem CNN6** (11-class instrument classifier) or [Demucs](https://github.com/facebookresearch/demucs) (HTDemucs ONNX) RMS classify → group stems<br>optional [SI-SDR](https://source-separation.github.io/tutorial/basics/evaluation.html#si-sdr) quality filter; export organized folders |
-| **Genre & Gender** | **Genre** — [MAEST](https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e) genre/style tags<br>**Gender** — [EffNet gender](https://essentia.upf.edu/models.html#voice-gender) (male/female) + In-house trained reverb (dry/wet)<br>**Vocal type** — [PANNs](https://github.com/qiuqiangkong/audioset_tagging_cnn) (Singing/Speech/Rapping/Humming/Choir) |
-| **Key** | In-house trained KeyNet CNN → `KEY` / Initial key — [outperforms](https://docs.google.com/spreadsheets/d/1asmBVlIjimZ9XAmK5JE42SX4vAvjGqjLflukYBgFSuE/edit?usp=sharing) [original model](https://github.com/a1ex90/MusicalKeyCNN/blob/main/checkpoints/keynet.pt) + [MIK](https://mixedinkey.com/) |
+| **Genre & Gender** | **Genre** - [MAEST](https://huggingface.co/mtg-upf/discogs-maest-30s-pw-129e) genre/style tags<br>**Gender** - [EffNet gender](https://essentia.upf.edu/models.html#voice-gender) (male/female) + In-house trained reverb (dry/wet)<br>**Vocal type** - [PANNs](https://github.com/qiuqiangkong/audioset_tagging_cnn) (Singing/Speech/Rapping/Humming/Choir) |
+| **Key** | In-house trained KeyNet CNN → `KEY` / Initial key - [outperforms](https://docs.google.com/spreadsheets/d/1asmBVlIjimZ9XAmK5JE42SX4vAvjGqjLflukYBgFSuE/edit?usp=sharing) [original model](https://github.com/a1ex90/MusicalKeyCNN/blob/main/checkpoints/keynet.pt) + [MIK](https://mixedinkey.com/) |
 | **Match & Align** | Pair instrumental/vocal folders, organize pairs, align stems to a reference |
 | **Rename** | Rule-based sample rename + optional instrument Auto-detect (Stem CNN6, 11-class instrument classifier) |
-| **Integrity** | **Compression** — [FLAC Detective](https://pypi.org/project/flac-detective/) lossless/lossy<br>**Corruption** — fast/deep verify + fix ([AudioTester](http://www.vuplayer.com/other.php) / [foobar2k](https://www.foobar2000.org/) alike)<br>**Convert** — batch to FLAC |
+| **Integrity** | **Compression** - [FLAC Detective](https://pypi.org/project/flac-detective/) lossless/lossy<br>**Corruption** - fast/deep verify + fix ([AudioTester](http://www.vuplayer.com/other.php) / [foobar2k](https://www.foobar2000.org/) alike)<br>**Convert** - batch to FLAC |
 | **Charts** | Scan library roots → donuts, genre/style breakdown, [SI-SDR](https://source-separation.github.io/tutorial/basics/evaluation.html#si-sdr) bars<br>Export PNG/PDF + output balanced dataset |
 
 Downstream tabs can auto-fill paths from Classify output (`*_organized`).
@@ -64,7 +64,7 @@ build.bat
 dist\STEM-organizer\STEM-organizer.exe
 ```
 
-`build.bat` freezes ML deps from `requirements.txt`, bundles **ffmpeg / mp3val / flac** beside the EXE, and runs a pre-ship smoke gate (`_smoke_all.py`) against the fresh dist — codec decode, tag writes, and pair matching must pass before the build reports SUCCESS. The EXE runs without `install-deps.bat`.
+`build.bat` freezes ML deps from `requirements.txt`, bundles **ffmpeg / mp3val / flac** beside the EXE, and runs a pre-ship smoke gate (`_smoke_all.py`) against the fresh dist - codec decode, tag writes, and pair matching must pass before the build reports SUCCESS. The EXE runs without `install-deps.bat`.
 
 Installer: compile `stem_organizer.iss` → downloads the 8 ONNX assets from
 [bascurtiz/STEM-organizer-models](https://github.com/bascurtiz/STEM-organizer-models) tag `models`.
@@ -124,18 +124,18 @@ Comparison of **HTdemucs (PyTorch + CUDA)** vs **HTdemucs (ONNX + CUDA EP)**
 Only **Classify RMS**, **Classify SI-SDR**, and **Rename** actually involve a stem-separation model;
 everything else (Genre, Gender, Vocal type, Key) is a separate classifier that doesn't touch HTdemucs or Stem CNN6 at all.
 
-| Task | Engine used | v1.0.7 | v1.0.8 — HTdemucs | v1.0.8 — Stem CNN6 |
+| Task | Engine used | v1.0.7 | v1.0.8 - HTdemucs | v1.0.8 - Stem CNN6 |
 |---|---|---|---|---|
 | Classify RMS | HTdemucs *or* Stem CNN6 | 6:40:00 | 🔴 10:05:00 | 🟢 4:20:00 |
 | Classify SI-SDR | HTdemucs only | 🟢 0:48:20 | 🔴 0:54:10 | Classifier only |
-| Genre | - | 🟢 0:04:24 | 🔴 0:04:27 | — |
-| Gender | - | 🟢 0:03:07 | 🔴 0:03:24 | — |
-| Vocal type | - | 🔴 0:00:55 | 🟢 0:00:28 | — |
-| Key | - | 🟢 0:04:08 | 🔴 0:05:02 | — |
-| Rename | Stem CNN6 only *(new in v1.0.8)* | 🔴 0:00:37 | — | 🟢 0:00:14 |
-| Compression | - | — | 🟡 0:08:09 | — |
-| Corruption | - | — | 🟡 0:00:34 | — |
-| Convert | - | — | 🟡 0:00:58 | — |
+| Genre | - | 🟢 0:04:24 | 🔴 0:04:27 | - |
+| Gender | - | 🟢 0:03:07 | 🔴 0:03:24 | - |
+| Vocal type | - | 🔴 0:00:55 | 🟢 0:00:28 | - |
+| Key | - | 🟢 0:04:08 | 🔴 0:05:02 | - |
+| Rename | Stem CNN6 only *(new in v1.0.8)* | 🔴 0:00:37 | - | 🟢 0:00:14 |
+| Compression | - | - | 🟡 0:08:09 | - |
+| Corruption | - | - | 🟡 0:00:34 | - |
+| Convert | - | - | 🟡 0:00:58 | - |
 
 ## Project layout
 
