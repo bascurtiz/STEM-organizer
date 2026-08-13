@@ -964,6 +964,7 @@ class TrackRenamerApp(QWidget):
             "skip_confidence": "didn't match confidence",
             "skip_margin": "didn't match min. margin",
             "skip_both": "didn't match confidence + min. margin",
+            "skip_silence": "silent / ambiguous",
         }.get(action, "")
         self.preview_panel.append_analyze_log(
             filename=name,

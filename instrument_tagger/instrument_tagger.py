@@ -41,10 +41,20 @@ SAMPLE_RATE = 32000
 MAX_AUDIO_SECONDS = 10.0
 CLIP_SAMPLES = int(SAMPLE_RATE * MAX_AUDIO_SECONDS)  # 320000 — training segment
 
+# Fully-silent stems (no signal anywhere in the file) are ambiguous — skip them
+# instead of emitting an arbitrary label (the model never saw silence in
+# training). Peak amplitude below this floor counts as silence.
+SILENCE_PEAK_FLOOR = 1e-4
+
 # Cap chunks/files per Session.run() to bound peak memory. The exported graph
 # has a dynamic batch axis, so pooling many clips into one call is much faster
 # than one call per clip — especially on GPU.
 MAX_ONNX_BATCH = 16
+
+# Long audio is chunked into 10 s clips with 50% overlap (matches the Classify
+# path); chunks quieter than this RMS floor contribute ~0 weight to the average.
+CHUNK_OVERLAP = 0.5
+SILENCE_RMS_FLOOR = 1e-4
 
 HERE = Path(__file__).resolve().parent
 # Single model source: the root models/ folder (beside the exe when frozen).
@@ -95,59 +105,64 @@ def _print_json(obj: dict) -> None:
 
 
 def load_mono_32k(filename: str | Path) -> np.ndarray:
-    """Mono float32 @ 32 kHz, first MAX_AUDIO_SECONDS.
+    """Full-length mono float32 @ 32 kHz; empty if fully silent.
 
-    Loads the first ~10 s, downmixes to mono, resamples to 32 kHz, and pads /
-    trims to CLIP_SAMPLES. Peak-normalises only if the signal exceeds 1.0
-    (matches the training-time preprocessing exactly).
+    Loads the entire file (downmixed to mono, resampled to 32 kHz) so the
+    backend can chunk it and classify the *whole* stem — a stem with a silent
+    intro is still classified from its later content. A fully-silent stem (no
+    signal anywhere) returns an empty array so the caller can skip it.
+    Peak-normalises only if the signal exceeds 1.0 (matches the training-time
+    preprocessing exactly).
     """
     import librosa
 
-    max_src = None
+    audio: np.ndarray | None = None
+    sr = SAMPLE_RATE
+    full_peak = 0.0
+
     try:
         info = sf.info(str(filename))
         if info.samplerate > 0:
-            max_src = int(MAX_AUDIO_SECONDS * info.samplerate) + info.samplerate
+            sr = int(info.samplerate)
+        else:
+            info = None
     except Exception:
-        max_src = None
+        info = None
 
-    try:
-        data, sr = sf.read(
-            str(filename),
-            always_2d=True,
-            dtype="float32",
-            frames=max_src if max_src else -1,
-        )
-        audio = data.mean(axis=1)
-        if sr != SAMPLE_RATE:
-            audio = librosa.resample(
-                audio,
-                orig_sr=sr,
-                target_sr=SAMPLE_RATE,
-                res_type="soxr_hq",
-            )
-    except Exception:
+    if info is not None:
+        # Stream the whole file (memory-light) down to mono while tracking peak.
+        try:
+            parts: list[np.ndarray] = []
+            with sf.SoundFile(str(filename)) as f:
+                for block in f.blocks(blocksize=65536, always_2d=True):
+                    mono = block.mean(axis=1).astype(np.float32, copy=False)
+                    if mono.size:
+                        bp = float(np.max(np.abs(mono)))
+                        if bp > full_peak:
+                            full_peak = bp
+                    parts.append(mono)
+            audio = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)
+        except Exception:
+            audio = None
+
+    if audio is None:
         # sf can't decode some codecs (m4a/aac/opus) — librosa/audioread uses
         # ffmpeg (bundled app ffmpeg is on PATH).
-        audio, _ = librosa.load(str(filename), sr=SAMPLE_RATE, mono=True)
-    if audio.shape[0] > CLIP_SAMPLES:
-        audio = audio[:CLIP_SAMPLES]
+        audio, sr = librosa.load(str(filename), sr=None, mono=True)
+        full_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+
+    if full_peak < SILENCE_PEAK_FLOOR:
+        return np.zeros(0, dtype=np.float32)
+
+    if sr != SAMPLE_RATE:
+        audio = librosa.resample(
+            audio, orig_sr=sr, target_sr=SAMPLE_RATE, res_type="soxr_hq"
+        )
     # Peak normalize lightly — matches trainer.
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
     if peak > 1.0:
         audio = audio / peak
     return audio.astype(np.float32, copy=False)
-
-
-def _pad_clip(audio: np.ndarray) -> np.ndarray:
-    """Pad/trim to CLIP_SAMPLES so every input is exactly 10 s."""
-    if audio.size == 0:
-        return audio
-    if audio.shape[0] < CLIP_SAMPLES:
-        return np.pad(audio, (0, CLIP_SAMPLES - audio.shape[0]))
-    if audio.shape[0] > CLIP_SAMPLES:
-        return audio[:CLIP_SAMPLES]
-    return audio
 
 
 class StemCnn6BackendOnnx:
@@ -187,35 +202,91 @@ class StemCnn6BackendOnnx:
     def predict(self, audio: np.ndarray) -> np.ndarray:
         return self.predict_batch([audio])[0]
 
-    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
-        """Batch raw waveforms into shared ONNX calls. Returns (N, 11) float32.
+    def _chunk_mono(self, audio) -> tuple[list[np.ndarray], list[float]]:
+        """Split a mono waveform into 10 s clips + per-clip RMS weights.
 
-        Pools all clips into sub-batches capped at ``MAX_ONNX_BATCH`` so peak
-        memory stays bounded. Empty/None clips are fed zeros and their output
-        rows are zeroed afterwards (no valid prediction for silence).
+        Long audio is chunked with 50% overlap (matches the Classify path).
+        Chunks quieter than ``SILENCE_RMS_FLOOR`` get weight 0, so a silent
+        intro can't dilute the chunks that actually carry signal. Empty/None
+        input returns ([], []).
+        """
+        if audio is None or getattr(audio, "size", 0) == 0:
+            return [], []
+        mono = np.asarray(audio, dtype=np.float32)
+        t_len = mono.shape[0]
+        if t_len <= CLIP_SAMPLES:
+            starts = [0]
+        else:
+            stride = max(1, int(CLIP_SAMPLES * (1.0 - CHUNK_OVERLAP)))
+            n_chunks = (t_len - CLIP_SAMPLES) // stride + 1
+            if (n_chunks - 1) * stride + CLIP_SAMPLES < t_len:
+                n_chunks += 1
+            starts = [ci * stride for ci in range(n_chunks)]
+
+        chunks: list[np.ndarray] = []
+        weights: list[float] = []
+        for start in starts:
+            end = min(start + CLIP_SAMPLES, t_len)
+            real = mono[start:end]
+            rms = float(np.sqrt(np.mean(real**2) + 1e-12)) if real.size else 0.0
+            weights.append(rms if rms >= SILENCE_RMS_FLOOR else 0.0)
+            if real.shape[0] < CLIP_SAMPLES:
+                padded = np.zeros(CLIP_SAMPLES, dtype=np.float32)
+                padded[: real.shape[0]] = real
+                chunks.append(padded)
+            else:
+                chunks.append(real)
+        return chunks, weights
+
+    def predict_batch(self, audios: list[np.ndarray]) -> np.ndarray:
+        """Classify full stems → (N, 11) float32, chunking long audio.
+
+        Each input is split into 10 s clips (50% overlap), pooled into shared
+        ONNX calls capped at ``MAX_ONNX_BATCH``, then RMS-weighted back into one
+        probability vector per input. Fully-silent inputs (or inputs whose every
+        chunk is silent) return an all-zero row — no valid prediction.
         """
         n = len(audios)
         if n == 0:
             return np.zeros((0, N_CLASSES), dtype=np.float32)
-        clips: list[np.ndarray] = []
-        empty_idx: list[int] = []
-        for i, audio in enumerate(audios):
-            if audio is None or getattr(audio, "size", 0) == 0:
-                empty_idx.append(i)
-                clips.append(np.zeros(CLIP_SAMPLES, dtype=np.float32))
-            else:
-                clips.append(_pad_clip(np.asarray(audio, dtype=np.float32)))
 
+        per_audio_chunks: list[list[np.ndarray]] = []
+        per_audio_weights: list[list[float]] = []
+        pooled: list[np.ndarray] = []
+        for audio in audios:
+            chunks, weights = self._chunk_mono(audio)
+            per_audio_chunks.append(chunks)
+            per_audio_weights.append(weights)
+            pooled.extend(chunks)
+
+        pooled_probs = self._run_pooled(pooled)  # (total_chunks, N_CLASSES)
+
+        out = np.zeros((n, N_CLASSES), dtype=np.float32)
+        offset = 0
+        for i in range(n):
+            cnt = len(per_audio_chunks[i])
+            if cnt == 0:
+                continue
+            p = pooled_probs[offset : offset + cnt]
+            offset += cnt
+            w = np.asarray(per_audio_weights[i], dtype=np.float32)
+            wsum = float(w.sum())
+            if wsum > 0:
+                out[i] = (p * w[:, np.newaxis]).sum(axis=0) / wsum
+            # else: every chunk was silent — leave the row zeroed (skip).
+        return out
+
+    def _run_pooled(self, chunks: list[np.ndarray]) -> np.ndarray:
+        """Run pooled clips through ONNX in sub-batches bounded by MAX_ONNX_BATCH."""
+        if not chunks:
+            return np.zeros((0, N_CLASSES), dtype=np.float32)
         out_rows: list[np.ndarray] = []
-        for start in range(0, n, MAX_ONNX_BATCH):
-            sub = clips[start : start + MAX_ONNX_BATCH]
-            inp = np.stack(sub, axis=0)  # (b, CLIP_SAMPLES) raw waveform
+        for start in range(0, len(chunks), MAX_ONNX_BATCH):
+            sub = chunks[start : start + MAX_ONNX_BATCH]
+            inp = np.stack(sub, axis=0)
             probs = self.session.run(["probs"], {"audio": inp})[0]
             out_rows.append(np.clip(probs, 0.0, 1.0).astype(np.float32))
-        out = np.concatenate(out_rows, axis=0) if out_rows else np.zeros((0, N_CLASSES), dtype=np.float32)
-        for i in empty_idx:
-            out[i] = 0.0
-        return out
+        return np.concatenate(out_rows, axis=0)
 
 
 def _batch_size() -> int:
@@ -293,6 +364,22 @@ def probs_to_result(
     softmax already produces a single clean distribution over mutually
     exclusive classes, so argmax is the correct primary label.
     """
+    probs = np.asarray(probs, dtype=np.float32)
+    if probs.size == 0 or float(probs.max()) <= 0.0:
+        # Zeroed row: the clip was empty or near-silent, so there is no valid
+        # prediction. Return an empty result so the rename pipeline skips it.
+        return {
+            "label": "",
+            "score": 0.0,
+            "score_raw": 0.0,
+            "top": [],
+            "above": [],
+            "n_patches": 0,
+            "model": "stem-cnn6",
+            "demoted_synth": False,
+            "second_score": 0.0,
+            "silent": True,
+        }
     order = np.argsort(-probs)
     best_i = int(order[0])
 
@@ -326,6 +413,7 @@ def probs_to_result(
         "demoted_synth": False,
         # Margin vs runner-up — handy for confidence gating downstream.
         "second_score": p2,
+        "silent": False,
     }
 
 

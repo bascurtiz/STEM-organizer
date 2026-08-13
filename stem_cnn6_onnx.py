@@ -364,13 +364,16 @@ class StemCnn6OnnxModel:
             wsum = float(w.sum())
             if wsum > 0:
                 p = (item_probs * w[:, np.newaxis]).sum(axis=0) / wsum
+                fine_labels.append(FINE_CLASSES[int(np.argmax(p))])
             else:
-                # Every chunk was near-silent (e.g. an empty/blank stem) —
-                # fall back to a plain mean so we still return *something*
-                # rather than an all-zero vector.
-                p = item_probs.mean(axis=0)
+                # Every chunk was near-silent (e.g. an empty/blank stem). The
+                # model never saw silence in training, so its prediction here
+                # is arbitrary — leave probs all-zero (no fine label) so the
+                # downstream RMS classification sees a zero-energy, ambiguous
+                # stem and skips it instead of mislabeling silence.
+                p = np.zeros(N_FINE, dtype=np.float32)
+                fine_labels.append(None)
             probs[i] = p
-            fine_labels.append(FINE_CLASSES[int(np.argmax(p))])
         self._last_fine_labels = fine_labels
 
         # Collapse fine probs → 4 stem shares.

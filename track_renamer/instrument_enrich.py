@@ -35,7 +35,7 @@ def _tagger_script() -> Path:
 
 
 # Bump when model/label set / primary-pick / confidence policy changes.
-_CACHE_MODEL = "stem-cnn6-v3"
+_CACHE_MODEL = "stem-cnn6-v4"
 _CACHE_FILE = "instrument_stem_cnn6_cache.json"
 _CACHE_VERSION = 1
 _CACHE_MAX_ENTRIES = 100_000
@@ -191,8 +191,9 @@ def classify_decision(
     """Return (action, category_name).
 
     Actions: ``apply`` | ``skip_unmap`` | ``skip_confidence`` | ``skip_margin``
-    | ``skip_both``. Confidence / margin match Classify RMS defaults (40% / 20%)
-    unless overridden.
+    | ``skip_both`` | ``skip_silence``. Confidence / margin match Classify RMS
+    defaults (40% / 20%) unless overridden. ``skip_silence`` is returned for
+    empty labels (near-silent stems with no valid prediction).
     """
     thr = (
         DEFAULT_INSTRUMENT_CONFIDENCE
@@ -204,6 +205,10 @@ def classify_decision(
         if min_margin is None
         else max(0.0, float(min_margin))
     )
+    if not (label or "").strip():
+        # Empty label: the model saw near-silence, so there is no valid
+        # prediction to apply. Skip the stem (ambiguous).
+        return "skip_silence", ""
     category = map_instrument_to_category(label)
     if not category:
         return "skip_unmap", category
