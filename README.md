@@ -121,18 +121,21 @@ Comparison of **HTdemucs (PyTorch + CUDA)** vs **HTdemucs (ONNX + CUDA EP)**
 
 ## Results (on 1000 files)
 
-| Task | Multiplier | v1.0.7 - HTdemucs | v1.0.8 - HTdemucs | v1.0.8 - Stem CNN6 |
+Only **Classify RMS**, **Classify SI-SDR**, and **Rename** actually involve a stem-separation model;
+everything else (Genre, Gender, Vocal type, Key) is a separate classifier that doesn't touch HTdemucs or Stem CNN6 at all.
+
+| Task | Engine used | v1.0.7 | v1.0.8 — HTdemucs | v1.0.8 — Stem CNN6 |
 |---|---|---|---|---|
-| Classify RMS | x100 | 6:40:00 | 🔴 10:05:00 | 🟢 4:20:00 |
-| Classify SI-SDR | x50 | 🟢 0:48:20 | 🔴 0:54:10 | Classifier only |
-| Genre | x0 | 🟢 0:04:24 | 🔴 0:04:27 | - |
-| Gender | x0 | 🟢 0:03:07 | 🔴 0:03:24 | - |
-| Vocal type | x0 | 🔴 0:00:55 | 🟢 0:00:28 | - |
-| Key | x0 | 🟢 0:04:08 | 🔴 0:05:02 | - |
-| Rename | x0 | 🔴 0:00:37 | - | 🟢 0:00:14 |
-| Compression | - | - | 🟡 0:08:09 | - |
-| Corruption | - | - | 🟡 0:00:34 | - |
-| Convert | - | - | 🟡 0:00:58 | - |
+| Classify RMS | HTdemucs *or* Stem CNN6 | 6:40:00 | 🔴 10:05:00 | 🟢 4:20:00 |
+| Classify SI-SDR | HTdemucs only | 🟢 0:48:20 | 🔴 0:54:10 | Classifier only |
+| Genre | - | 🟢 0:04:24 | 🔴 0:04:27 | — |
+| Gender | - | 🟢 0:03:07 | 🔴 0:03:24 | — |
+| Vocal type | - | 🔴 0:00:55 | 🟢 0:00:28 | — |
+| Key | - | 🟢 0:04:08 | 🔴 0:05:02 | — |
+| Rename | Stem CNN6 only *(new in v1.0.8)* | 🔴 0:00:37 | — | 🟢 0:00:14 |
+| Compression | - | — | 🟡 0:08:09 | — |
+| Corruption | - | — | 🟡 0:00:34 | — |
+| Convert | - | — | 🟡 0:00:58 | — |
 
 ## Project layout
 
