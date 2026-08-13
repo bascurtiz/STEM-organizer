@@ -79,6 +79,7 @@ LOG_STEM_COLORS = {
     "synth":        "#10b981",
     "vocals":       "#a855f7",
     "wind":         "#00b8d3",
+    "winds":        "#00b8d3",  # fine 11-class label (plural) — same as Rename WINDS prefix
     "instrumental": "#60A5FA",
     "acapella":     "#a855f7",
     "vocal":        "#a855f7",

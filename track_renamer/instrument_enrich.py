@@ -35,7 +35,7 @@ def _tagger_script() -> Path:
 
 
 # Bump when model/label set / primary-pick / confidence policy changes.
-_CACHE_MODEL = "stem-cnn6-v2"
+_CACHE_MODEL = "stem-cnn6-v3"
 _CACHE_FILE = "instrument_stem_cnn6_cache.json"
 _CACHE_VERSION = 1
 _CACHE_MAX_ENTRIES = 100_000
