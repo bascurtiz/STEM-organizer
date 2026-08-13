@@ -102,6 +102,38 @@ Charts reads these tags from your library:
 | Keys | Initial key (`TKEY` / `INITIALKEY`; legacy `KEY` fallback) |
 | Compression | `COMPRESSION` |
 
+# STEM Organizer - Benchmark
+
+Comparison of **HTdemucs (PyTorch + CUDA)** vs **HTdemucs (ONNX + CUDA EP)**
+
+## Test setup
+
+| | |
+|---|---|
+| CPU | AMD Ryzen 5800x |
+| RAM | 32 GB |
+| Storage | SSD |
+| GPU | NVIDIA RTX 5090 |
+| v1.0.7 | PyTorch + CUDA |
+| v1.0.8 | ONNX + CUDA EP |
+
+**Legend:** 🟢 faster/better · 🔴 slower/worse · 🟡 new metric (no prior-version comparison)
+
+## Results (on 1000 files)
+
+| Task | Multiplier | v1.0.7 - HTdemucs | v1.0.8 - HTdemucs | v1.0.8 - Stem CNN6 |
+|---|---|---|---|---|
+| Classify RMS | x100 | 6:40:00 | 🔴 10:05:00 | 🟢 4:20:00 |
+| Classify SI-SDR | x50 | 🟢 0:48:20 | 🔴 0:54:10 | Classifier only |
+| Genre | x0 | 🟢 0:04:24 | 🔴 0:04:27 | - |
+| Gender | x0 | 🟢 0:03:07 | 🔴 0:03:24 | - |
+| Vocal type | x0 | 🔴 0:00:55 | 🟢 0:00:28 | - |
+| Key | x0 | 🟢 0:04:08 | 🔴 0:05:02 | - |
+| Rename | x0 | 🔴 0:00:37 | - | 🟢 0:00:14 |
+| Compression | - | - | 🟡 0:08:09 | - |
+| Corruption | - | - | 🟡 0:00:34 | - |
+| Convert | - | - | 🟡 0:00:58 | - |
+
 ## Project layout
 
 ```
