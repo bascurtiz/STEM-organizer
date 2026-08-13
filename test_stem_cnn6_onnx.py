@@ -13,10 +13,13 @@ present; nothing is downloaded by the tests.
 """
 
 import sys
+import tempfile
 import unittest
+import wave
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf_mod
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -33,7 +36,8 @@ from stem_cnn6_onnx import (  # noqa: E402
 
 SAMPLE_RATE = 32000
 CLIP_SAMPLES = 320000
-MODE = cb.STEM_MODES["4 (bass/drums/other/vocals)"]
+MODE_4 = cb.STEM_MODES["4 (bass/drums/other/vocals)"]
+MODE_2 = cb.STEM_MODES["2 (instrumental/vocals)"]
 
 
 def _vocals_only_run(chunks):
@@ -70,6 +74,35 @@ def _energies(out, item=0, t_len=None):
     }
 
 
+def _write_wav(path: Path, samples: np.ndarray, sample_rate: int = SAMPLE_RATE) -> None:
+    x = np.asarray(samples, dtype=np.float32)
+    with wave.open(str(path), "w") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sample_rate)
+        w.writeframes((np.clip(x, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes())
+
+
+def _silent_wav(path: Path, seconds: float = 10.0) -> None:
+    _write_wav(path, np.zeros(int(SAMPLE_RATE * seconds), dtype=np.float32))
+
+
+def _tone_wav(path: Path, seconds: float = 10.0, freq: float = 440.0) -> None:
+    _write_wav(path, _tone(seconds, freq))
+
+
+class ClassifyToCategoryTests(unittest.TestCase):
+    """The invariant classify_batch relies on: zero energies skip in every mode."""
+
+    def test_zero_energies_skip_in_every_stem_mode(self):
+        energies = {name: 0.0 for name in SOURCES}
+        for key, mode in cb.STEM_MODES.items():
+            label, _top, _share, _margin, _reason = cb.classify_to_category(
+                energies, mode, 0.4, 0.2
+            )
+            self.assertEqual(label, "skip", f"zero energies must skip in {key}")
+
+
 class SilentSkipTests(unittest.TestCase):
     """Stubbed model — the exact regression: silent stem -> skip + None label."""
 
@@ -81,7 +114,7 @@ class SilentSkipTests(unittest.TestCase):
         # class (e.g. VOCALS); now it must yield no fine label at all.
         self.assertEqual(model._last_fine_labels, [None])
         label, _top, _share, _margin, _reason = cb.classify_to_category(
-            _energies(out), MODE, 0.4, 0.2
+            _energies(out), MODE_4, 0.4, 0.2
         )
         self.assertEqual(label, "skip")
 
@@ -90,7 +123,7 @@ class SilentSkipTests(unittest.TestCase):
         out = model.separate_numpy(_stereo(_tone()))
         self.assertEqual(model._last_fine_labels, ["VOCALS"])
         label, _top, top_share, _margin, _reason = cb.classify_to_category(
-            _energies(out), MODE, 0.4, 0.2
+            _energies(out), MODE_4, 0.4, 0.2
         )
         self.assertEqual(label, "vocals")
         self.assertGreater(top_share, 0.9)
@@ -123,7 +156,7 @@ class ModelSilentTests(unittest.TestCase):
         out = self.model.separate_numpy(silent)
         self.assertEqual(self.model._last_fine_labels, [None])
         label, _top, _share, _margin, _reason = cb.classify_to_category(
-            _energies(out), MODE, 0.4, 0.2
+            _energies(out), MODE_4, 0.4, 0.2
         )
         self.assertEqual(label, "skip")
 
@@ -134,11 +167,71 @@ class ModelSilentTests(unittest.TestCase):
             self.model._last_fine_labels[0], FINE_CLASSES,
             "a non-silent stem must produce a real fine label (not None)",
         )
-        # A non-silent stem's synthetic output must carry dominant energy in
-        # exactly one stem (vs. silent stems whose energies are all equal).
         energies = _energies(out)
         ranked = sorted(energies.values(), reverse=True)
         self.assertGreater(ranked[0], ranked[1])
+
+
+class ClassifyBatchTests(unittest.TestCase):
+    """classify_batch zeroes energies for silent stems (2-stem mode regression)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.onnx = resolve_stem_cnn6_onnx()
+        cls.model = None
+        cls._skip_reason = ""
+        if cls.onnx is None:
+            return
+        try:
+            # classify_batch needs the lazy decode globals (np + soundfile).
+            cb.np = np
+            cb.sf = sf_mod
+            cls.model = StemCnn6OnnxModel(cls.onnx, prefer_gpu=False)
+        except Exception as exc:  # noqa: BLE001 — skip instead of fail
+            cls.onnx = None
+            cls._skip_reason = str(exc)
+
+    def setUp(self):
+        if self.onnx is None:
+            if self._skip_reason:
+                self.skipTest(f"backend load failed: {self._skip_reason}")
+            self.skipTest("stem_cnn6.onnx not present")
+
+    def test_silent_stem_zeroes_energies_and_skips_in_two_stem_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            wav = Path(td) / "silent.wav"
+            _silent_wav(wav)
+            rows = list(cb.classify_batch(self.model, [wav], "cpu", batch_size=1))
+        self.assertEqual(len(rows), 1)
+        _fp, energies, err, fine = rows[0]
+        self.assertIsNone(err)
+        self.assertIsNone(fine, "silent stem must yield no fine label")
+        self.assertTrue(
+            all(v == 0.0 for v in energies.values()),
+            "silent stem energies must be zeroed by classify_batch",
+        )
+        label, _top, _share, _margin, _reason = cb.classify_to_category(
+            energies, MODE_2, 0.4, 0.2
+        )
+        self.assertEqual(label, "skip")
+
+    def test_real_stem_yields_nonzero_energies_and_classifies(self):
+        with tempfile.TemporaryDirectory() as td:
+            wav = Path(td) / "tone.wav"
+            _tone_wav(wav)
+            rows = list(cb.classify_batch(self.model, [wav], "cpu", batch_size=1))
+        self.assertEqual(len(rows), 1)
+        _fp, energies, err, fine = rows[0]
+        self.assertIsNone(err)
+        self.assertIsNotNone(fine, "real stem must yield a fine label")
+        self.assertTrue(
+            any(v > 0.0 for v in energies.values()),
+            "real stem energies must not be zeroed",
+        )
+        label, _top, _share, _margin, _reason = cb.classify_to_category(
+            energies, MODE_2, 0.4, 0.2
+        )
+        self.assertNotEqual(label, "skip")
 
 
 if __name__ == "__main__":

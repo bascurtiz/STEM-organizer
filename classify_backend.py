@@ -1318,13 +1318,23 @@ def classify_batch(model, file_paths, device: str, batch_size: int = 4, stop_eve
                     continue
 
             for j, fp in enumerate(valid):
-                energies = {n: _rms(out_np[j, k, :, :lengths[j]]) for k, n in enumerate(sources)}
                 # Optional fine label: the vocal classifier runner exposes the
                 # 11-class prediction per batch item; HTDemucs has none (None).
                 fine = None
+                silent = False
                 fine_labels = getattr(model, '_last_fine_labels', None)
                 if fine_labels is not None and j < len(fine_labels):
                     fine = fine_labels[j]
+                    silent = fine is None
+                if silent:
+                    # Fully-silent stem (Stem CNN6 returned no fine label): zero
+                    # the energies so classify_to_category skips it in *every*
+                    # stem mode. Equal tiny RMS values would otherwise collapse
+                    # into a confident instrumental/vocals split in 2-stem mode
+                    # (3 synthetic sources vs 1) and mislabel silence.
+                    energies = {n: 0.0 for n in sources}
+                else:
+                    energies = {n: _rms(out_np[j, k, :, :lengths[j]]) for k, n in enumerate(sources)}
                 yield (fp, energies, None, fine)
             if not onnx and device == 'cuda':
                 torch.cuda.empty_cache()
