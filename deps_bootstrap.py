@@ -492,8 +492,14 @@ def missing_deps_message(exc: ImportError) -> str:
 
 
 def _show_missing_deps_dialog(exc: ImportError) -> None:
-    import tkinter as tk
-    from tkinter import messagebox
+    # Legacy pre-Qt dialog; tkinter is excluded from the frozen build, so this
+    # path must degrade to a message instead of crashing.
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except Exception:
+        print(f'Missing dependencies dialog unavailable: {exc}')
+        return
 
     root = tk.Tk()
     root.withdraw()

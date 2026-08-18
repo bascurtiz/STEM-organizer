@@ -4,8 +4,15 @@ import threading
 import webbrowser
 
 import requests
-import tkinter as tk
 from packaging.version import parse as parse_version
+
+# tkinter is a legacy fallback from the pre-Qt app and is deliberately excluded
+# from the PyInstaller build (spec excludes). The Qt dialog is the primary path,
+# so a missing tkinter must never break the import of this module.
+try:
+    import tkinter as tk
+except Exception:
+    tk = None  # type: ignore[assignment]
 
 GITHUB_REPO_OWNER = 'bascurtiz'
 GITHUB_REPO_NAME = 'STEM-organizer'
@@ -83,6 +90,9 @@ def _show_update_dialog_qt(new_version_tag, parent_window):
 
 def _show_update_dialog_tk(new_version_tag, parent_window):
     """Legacy Tk dialog (only when parent is a real Tk window)."""
+    if tk is None:
+        print('ERROR: tkinter unavailable - cannot show Tk dialog.')
+        return
     if parent_window is None or not isinstance(parent_window, (tk.Tk, tk.Toplevel)):
         print('ERROR: Cannot show update dialog, invalid parent window.')
         return
