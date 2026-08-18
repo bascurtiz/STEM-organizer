@@ -1361,6 +1361,46 @@ def classify_to_category(energies: dict, mode_cfg: dict, threshold: float, min_m
     return (top_cat, top_cat, top_share, margin, None)
 
 
+def native_sample_rate(path) -> int | None:
+    """Native sample rate of a file without decoding.
+
+    soundfile first (fast metadata); falls back to the demucs AudioFile
+    streamer (ffmpeg-backed) for formats soundfile cannot read (m4a, opus,
+    mp3 on older libsndfile builds). Returns None when unknown.
+    """
+    p = Path(path)
+    if sf is not None:
+        try:
+            sr = int(sf.info(str(p)).samplerate)
+            if sr > 0:
+                return sr
+        except Exception:
+            pass
+    if AudioFile is not None:
+        try:
+            return int(AudioFile(str(p)).samplerate())
+        except Exception:
+            pass
+    return None
+
+
+def folder_output_rate(stems, fallback: int) -> int:
+    """Common sample rate for export: the most common native rate among the
+    stems (tie → highest), else the model/analysis rate.
+
+    Stems of one song normally share a rate, so the mix is written losslessly
+    at that rate; stragglers at other rates are resampled to the common rate.
+    """
+    counts: dict[int, int] = {}
+    for p in stems:
+        sr = native_sample_rate(p)
+        if sr:
+            counts[sr] = counts.get(sr, 0) + 1
+    if not counts:
+        return fallback
+    return max(counts, key=lambda s: (counts[s], s))
+
+
 def mix_originals(paths, sr: int):
     tracks = []
     for p in paths:
@@ -2533,12 +2573,19 @@ class Worker(threading.Thread):
             self._record_folder_outcome('skip_song')
             return manifest, next_n_ref[0]
 
+        # Export at the stems' native rate when they agree (analysis stays at
+        # the model rate). Stems of one song normally share a rate, so the mix
+        # is written losslessly instead of at the model's 32 kHz.
+        out_sr = folder_output_rate(stems, fallback=sr)
+        if out_sr != sr:
+            self.log(f"  Output at {out_sr} Hz (native stem rate; analysis at {sr} Hz)")
+
         t0 = time.monotonic()
         mixes = {}
         for cat, paths in buckets.items():
             if not paths:
                 continue
-            m = mix_originals(paths, sr=sr)
+            m = mix_originals(paths, sr=out_sr)
             if m.shape[1] == 0:
                 self.log(f"  [error] {cat}: all stems failed to load")
                 folder_had_errors = True
@@ -2554,21 +2601,21 @@ class Worker(threading.Thread):
             self._record_folder_outcome('skip_no_stems')
             return manifest, next_n_ref[0]
 
-        duration_sec = cut / sr
+        duration_sec = cut / out_sr
         target_dir, manifest, _ = self._resolve_output_dir(out_dir, rel, manifest, next_n_ref, duration_sec=duration_sec)
         self.log('Starting to write output...')
         t0 = time.monotonic()
         target_dir.mkdir(parents=True, exist_ok=True)
         gain = self._compute_gain(mixes, cut)
 
-        written_cats, export_errors = self._write_category_mixes(mixes, buckets, mode_cfg, target_dir, ext, subtype, sr, gain, cut)
+        written_cats, export_errors = self._write_category_mixes(mixes, buckets, mode_cfg, target_dir, ext, subtype, out_sr, gain, cut)
         folder_had_errors = folder_had_errors or export_errors
 
         if self.p['make_mixture'] and ext == '.wav' and cut > 0:
             total = sum(m[:, :cut] for m in mixes.values()) * gain
             mix_path = target_dir / f"mixture{ext}"
             try:
-                write_audio(str(mix_path), total, sr, subtype)
+                write_audio(str(mix_path), total, out_sr, subtype)
                 n = sum(len(buckets[c]) for c in mixes)
                 peak_db = 20 * np.log10(max(float(np.max(np.abs(total))), 1e-12))
                 self.log(f"  wrote mixture{ext}  ({n} stems, peak {peak_db:+.2f} dBFS)")
