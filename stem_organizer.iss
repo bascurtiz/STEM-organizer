@@ -10,7 +10,7 @@
 ; in dist, otherwise first-run helpers can fetch it.
 
 #define MyAppName "STEM organizer"
-#define MyAppVersion "1.0.8"
+#define MyAppVersion "1.0.9"
 #define MyAppPublisher "STEM organizer"
 #define MyAppExeName "STEM-organizer.exe"
 #define MyAppSource "dist\STEM-organizer"

@@ -258,7 +258,7 @@ RESOURCE_BAR_WIDTH = 52
 RESOURCE_ROW_HEIGHT = 16
 
 STATUS_LINK_URL = "https://github.com/bascurtiz/STEM-organizer"
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 
 # ---------------------------------------------------------------------------
 # Fonts — match D:\STEM-organizer\ui_theme.py (CTk sizes are pixels)
